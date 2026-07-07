@@ -5,6 +5,8 @@
 #include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -13,15 +15,116 @@
 #include "nvs_config.h"
 #include "wifi_manager.h"
 #include "modbus_master.h"
+#include "uart_config.h"
 #include "modbus_params.h"
-#include "mqtt_client.h"
+#include "app_mqtt.h"
 #include "data_pipeline.h"
+#include "ota_handler.h"
+#include "cJSON.h"
+#include "driver/gpio.h"
 
 static const char *TAG = "main";
 
 /* Task handles */
 static TaskHandle_t s_modbus_task = NULL;
 static TaskHandle_t s_pub_task = NULL;
+
+/* ================================================================
+ * MQTT write-command callback (bridges to pipeline)
+ * ================================================================ */
+
+/**
+ * Wrapper that adapts mqtt_data_cb_t(topic, data, len) →
+ * pipeline_parse_write_json(data).
+ * Runs in MQTT library task context — must NOT block.
+ */
+static void on_write_received(const char *topic, const char *data, int len)
+{
+    pipeline_parse_write_json(data);
+}
+
+/* ================================================================
+ * OTA callbacks
+ * ================================================================ */
+
+/**
+ * Forward OTA status messages to MQTT so the cloud can monitor progress.
+ */
+static void ota_status_callback(const char *msg, bool error)
+{
+    mqtt_client_publish_status(msg, strlen(msg));
+}
+
+/**
+ * Handle incoming MQTT OTA commands.
+ * Expected JSON payload: {"url": "https://ota.example.com/fw.bin"}
+ * Runs in MQTT library task context — must NOT block.
+ */
+static void on_ota_received(const char *topic, const char *data, int len)
+{
+    cJSON *root = cJSON_ParseWithLength(data, len);
+    if (!root) {
+        ESP_LOGW(TAG, "OTA: invalid JSON payload");
+        return;
+    }
+
+    cJSON *url_item = cJSON_GetObjectItem(root, "url");
+    if (cJSON_IsString(url_item) && url_item->valuestring) {
+        ESP_LOGI(TAG, "OTA request received: %s", url_item->valuestring);
+        ota_request(url_item->valuestring);
+    } else {
+        ESP_LOGW(TAG, "OTA: missing or invalid 'url' field");
+    }
+
+    cJSON_Delete(root);
+}
+
+/* ================================================================
+ * Factory Reset Button Monitor Task
+ *
+ * Hardwired to GPIO 9 (active-low, internal pull-up).
+ * A continuous 3-second LOW (button held) triggers nvs_config_reset().
+ * ================================================================ */
+
+#define RST_BUTTON_GPIO     9
+#define RST_HOLD_THRESHOLD  50      /* 5 seconds @ 100ms ticks */
+#define RST_POLL_MS         100
+
+static void factory_reset_task(void *arg)
+{
+    /* Configure GPIO 9 as input with internal pull-up */
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << RST_BUTTON_GPIO),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+
+    ESP_LOGI(TAG, "Factory-reset button on GPIO %d (hold %d ms to trigger)",
+             RST_BUTTON_GPIO, RST_HOLD_THRESHOLD * RST_POLL_MS);
+
+    int hold = 0;
+
+    while (1) {
+        if (gpio_get_level(RST_BUTTON_GPIO) == 0) {
+            hold++;
+            if (hold >= RST_HOLD_THRESHOLD) {
+                ESP_LOGW(TAG, "Factory-reset triggered — erasing config and rebooting...");
+                nvs_config_reset();
+                /* nvs_config_reset() calls esp_restart() — never returns */
+            }
+            /* Log progress every second */
+            if (hold % 10 == 0) {
+                ESP_LOGI(TAG, "Reset button held: %d/%d ticks", hold, RST_HOLD_THRESHOLD);
+            }
+        } else {
+            hold = 0;   /* button released — reset counter */
+        }
+        vTaskDelay(pdMS_TO_TICKS(RST_POLL_MS));
+    }
+}
 
 /* ================================================================
  * MQTT Publisher Task
@@ -49,7 +152,7 @@ static void mqtt_publisher_task(void *arg)
             /* STA mode active — start MQTT if not already */
             if (!mqtt_started) {
                 ESP_LOGI(TAG, "WiFi ready, starting MQTT...");
-                if (mqtt_client_start(pipeline_parse_write_json) == ESP_OK) {
+                if (mqtt_client_start(on_write_received, on_ota_received) == ESP_OK) {
                     mqtt_started = true;
                     /* Wait a bit for MQTT connection */
                     vTaskDelay(pdMS_TO_TICKS(3000));
@@ -110,21 +213,27 @@ static void modbus_poll_task(void *arg)
     while (1) {
         /* Wait for STA mode (GOT_IP) to be active */
         if (wifi_manager_get_state() != WIFI_STATE_STA_READY) {
+            if (modbus_init_done) {
+                modbus_uart_deinit();
+                modbus_init_done = false;
+                ESP_LOGI(TAG, "WiFi lost, MODBUS deinitialized");
+            }
             xEventGroupWaitBits(wifi_events, WIFI_EVENT_GOT_IP, pdFALSE, pdFALSE,
                                pdMS_TO_TICKS(1000));
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        /* Initialize MODBUS on first run after WiFi connected */
+        /* Initialize (or re-initialize) MODBUS after WiFi connected */
         if (!modbus_init_done) {
+            modbus_uart_deinit();   /* safe no-op if not initialized */
             if (modbus_master_init() != ESP_OK) {
                 ESP_LOGE(TAG, "MODBUS init failed, retrying...");
                 vTaskDelay(pdMS_TO_TICKS(5000));
                 continue;
             }
 
-            /* Parse register list from config */
+            /* Parse register list from config (always re-parse on re-init) */
             const config_t *c = nvs_config_get();
             if (strlen(c->reg_list) > 0) {
                 entry_count = modbus_params_parse(c->reg_list, entries, MODBUS_MAX_ENTRIES);
@@ -140,7 +249,7 @@ static void modbus_poll_task(void *arg)
 
         /* Refresh config (may have changed via web) */
         cfg = nvs_config_get();
-        period = pdMS_TO_TICKS(cfg->poll_intv);
+        period = pdMS_TO_TICKS(cfg->poll_intv < 200 ? 200 : cfg->poll_intv);
 
         /* ============================================================
          * Poll loop: iterate all register entries
@@ -224,23 +333,32 @@ void app_main(void)
     /* ------ 4. Create data pipeline (queues) ------ */
     ESP_ERROR_CHECK(pipeline_init());
 
-    /* ------ 5. Create tasks ------ */
+    /* ------ 5. Initialize OTA handler ------ */
+    ESP_ERROR_CHECK(ota_handler_init(ota_status_callback));
+
+    /* ------ 6. Factory-reset button monitor ------ */
+    xTaskCreatePinnedToCore(factory_reset_task, "rst_btn", 2048, NULL, 1,
+                            NULL, 0);
+
+    /* ------ 7. Create main tasks ------ */
     /* MODBUS poll task — pinned to Core 1 for real-time UART timing */
-    xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 4096, NULL, 5,
+    xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
                             &s_modbus_task, 1);
 
     /* MQTT publisher task — Core 0 (shares with WiFi + web server) */
-    xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 4096, NULL, 4,
+    xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 5120, NULL, 4,
                             &s_pub_task, 0);
 
-    /* ------ 6. Log chip info ------ */
+    /* ------ 8. Log chip info ------ */
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
+    uint32_t flash_size = 0;
+    esp_flash_get_size(NULL, &flash_size);
     ESP_LOGI(TAG, "Chip: %d cores, rev %d, flash=%d MB",
              chip_info.cores, chip_info.revision,
-             spi_flash_get_chip_size() / (1024 * 1024));
+             flash_size / (1024 * 1024));
 
-    /* ------ 7. Start WiFi state machine (may block during STA connect) ------ */
+    /* ------ 9. Start WiFi state machine (may block during STA connect) ------ */
     /* This is the last init step — all tasks are already running and waiting. */
     wifi_manager_init();
 

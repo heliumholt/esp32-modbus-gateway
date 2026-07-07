@@ -1,5 +1,7 @@
 #include <string.h>
 #include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_config.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -198,7 +200,11 @@ esp_err_t nvs_config_save(void)
 void nvs_config_reset(void)
 {
     ESP_LOGW(TAG, "Resetting configuration...");
-    nvs_flash_erase_partition("nvs");
+    esp_err_t err = nvs_flash_erase_partition("nvs");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS erase failed: 0x%x — rebooting anyway", err);
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));   /* let NVS settle */
     esp_restart();
 }
 
@@ -246,7 +252,7 @@ esp_err_t nvs_config_set_string(const char *key, const char *value)
     } else if (strcmp(key, "custom3") == 0) {
         strncpy(g_config.custom3, value, sizeof(g_config.custom3) - 1);
     } else {
-        ESP_LOGW(TAG, "Unknown string config key: %s", key);
+        ESP_LOGD(TAG, "Unknown string config key: %s", key);
         return ESP_ERR_NOT_FOUND;
     }
     return ESP_OK;
@@ -271,7 +277,7 @@ esp_err_t nvs_config_set_u8(const char *key, uint8_t value)
     } else if (strcmp(key, "de_pin") == 0) {
         g_config.de_pin = value;
     } else {
-        ESP_LOGW(TAG, "Unknown u8 config key: %s", key);
+        ESP_LOGD(TAG, "Unknown u8 config key: %s", key);
         return ESP_ERR_NOT_FOUND;
     }
     return ESP_OK;
@@ -284,7 +290,7 @@ esp_err_t nvs_config_set_u16(const char *key, uint16_t value)
     if (strcmp(key, "mqtt_port") == 0) {
         g_config.mqtt_port = value;
     } else {
-        ESP_LOGW(TAG, "Unknown u16 config key: %s", key);
+        ESP_LOGD(TAG, "Unknown u16 config key: %s", key);
         return ESP_ERR_NOT_FOUND;
     }
     return ESP_OK;
@@ -299,7 +305,7 @@ esp_err_t nvs_config_set_u32(const char *key, uint32_t value)
     } else if (strcmp(key, "poll_intv") == 0) {
         g_config.poll_intv = value;
     } else {
-        ESP_LOGW(TAG, "Unknown u32 config key: %s", key);
+        ESP_LOGD(TAG, "Unknown u32 config key: %s", key);
         return ESP_ERR_NOT_FOUND;
     }
     return ESP_OK;

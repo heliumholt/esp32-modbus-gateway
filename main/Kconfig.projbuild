@@ -39,4 +39,20 @@ menu "ESP32S3 MODBUS Gateway Configuration"
         help
             RS485 DE/RE direction control pin. Set -1 to disable.
 
+    config MODBUS_GW_OTA_ALLOW_HTTP
+        bool "Allow HTTP for OTA firmware download"
+        default y
+        help
+            If enabled, OTA firmware updates can use plain HTTP URLs
+            (in addition to HTTPS).  Disable to require HTTPS; this
+            needs valid CA certificates bundled or firmware signing.
+
+    config MODBUS_GW_OTA_DEFAULT_URL
+        string "Default OTA firmware URL"
+        default ""
+        help
+            Optional default URL for OTA firmware updates.  This can
+            be overridden at runtime by publishing to the {dev}/ota
+            MQTT topic with payload {"url":"https://..."}.
+
 endmenu

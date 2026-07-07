@@ -10,6 +10,7 @@ idf_component_register(
         "modbus_params.c"
         "mqtt_client.c"
         "data_pipeline.c"
+        "ota_handler.c"
     INCLUDE_DIRS
         "."
     EMBED_FILES
@@ -23,7 +24,14 @@ idf_component_register(
         mqtt
         cjson
         driver
+        esp_driver_uart
+        esp_driver_gpio
         lwip
+        spi_flash
+        esp_https_ota
+        app_update
+        bootloader_support
+        esp_timer
 )
 
 # Set compile options for smaller binary
@@ -38,5 +46,6 @@ set_source_files_properties(
     modbus_params.c
     mqtt_client.c
     data_pipeline.c
+    ota_handler.c
     PROPERTIES COMPILE_OPTIONS "-Os"
 )

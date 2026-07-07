@@ -1,4 +1,16 @@
-# Name,     Type, SubType, Offset,   Size
-nvs,        data, nvs,     0x9000,  0x6000
-phy_init,   data, phy,     0xF000,  0x1000
-factory,    app,  factory, 0x10000, 0x3E0000
+# Name,     Type, SubType,  Offset,     Size        Flags
+# ----------------------------------------------------------------
+# 16MB Flash OTA partition layout
+#
+# Boot sequence:
+#   1. First boot (factory image) → runs factory partition
+#   2. OTA update → writes to ota_0 or ota_1 (whichever is inactive)
+#   3. Reboot → bootloader checks otadata → boots new image
+#   4. Rollback: if new image fails, bootloader falls back to previous
+#
+nvs,        data, nvs,      0x9000,     0x6000
+phy_init,   data, phy,      0xF000,     0x1000
+otadata,    data, ota,      0x10000,    0x2000
+factory,    app,  factory,  0x20000,    0x3E0000
+ota_0,      app,  ota_0,    0x400000,   0x3E0000
+ota_1,      app,  ota_1,    0x7E0000,   0x3E0000

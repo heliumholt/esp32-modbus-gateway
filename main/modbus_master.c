@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/uart.h"
+#include "esp_rom_sys.h"
 #include "modbus_master.h"
 #include "uart_config.h"
 
@@ -113,6 +114,11 @@ static int modbus_recv_frame(uint8_t *buf, int max_len, int timeout_ms)
             if ((esp_timer_get_time() / 1000) - start > timeout_ms) return -1;
         }
         expected_len = 3 + buf[2] + 2;  /* slave+fc+bc+data+crc */
+        if (expected_len > MODBUS_FRAME_MAX) {
+            ESP_LOGW(TAG, "Bad byte_count 0x%02X → expected_len %d, clamping to %d",
+                     buf[2], expected_len, MODBUS_FRAME_MAX);
+            expected_len = MODBUS_FRAME_MAX;
+        }
     } else if (fc == MODBUS_FC_WRITE_SINGLE) {
         expected_len = 8;  /* echo of request */
     } else if (fc == MODBUS_FC_WRITE_MULTI) {

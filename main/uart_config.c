@@ -54,7 +54,7 @@ esp_err_t modbus_uart_init(void)
                                         0, NULL, 0));
 
     /* Initialize DE/RE pin as GPIO if configured */
-    if (cfg->de_pin != 0xFF) {
+    if (cfg->de_pin != 0xFF && cfg->de_pin < GPIO_NUM_MAX) {
         gpio_config_t io_cfg = {
             .pin_bit_mask = (1ULL << cfg->de_pin),
             .mode         = GPIO_MODE_OUTPUT,
@@ -76,7 +76,7 @@ esp_err_t modbus_uart_init(void)
 esp_err_t modbus_uart_deinit(void)
 {
     const config_t *cfg = nvs_config_get();
-    if (cfg->de_pin != 0xFF) {
+    if (cfg->de_pin != 0xFF && cfg->de_pin < GPIO_NUM_MAX) {
         gpio_set_level(cfg->de_pin, 0);
     }
     uart_flush(MODBUS_UART_NUM);
@@ -88,7 +88,7 @@ esp_err_t modbus_uart_deinit(void)
 void modbus_uart_set_rx_mode(void)
 {
     const config_t *cfg = nvs_config_get();
-    if (cfg->de_pin != 0xFF) {
+    if (cfg->de_pin != 0xFF && cfg->de_pin < GPIO_NUM_MAX) {
         gpio_set_level(cfg->de_pin, 0);
     }
 }
@@ -96,7 +96,7 @@ void modbus_uart_set_rx_mode(void)
 void modbus_uart_set_tx_mode(void)
 {
     const config_t *cfg = nvs_config_get();
-    if (cfg->de_pin != 0xFF) {
+    if (cfg->de_pin != 0xFF && cfg->de_pin < GPIO_NUM_MAX) {
         gpio_set_level(cfg->de_pin, 1);
     }
 }

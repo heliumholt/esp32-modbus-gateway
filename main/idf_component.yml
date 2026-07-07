@@ -1,0 +1,7 @@
+## IDF Component Manager Manifest File
+## ESP-IDF v6.0+ moved several components from core to the registry.
+dependencies:
+  espressif/mqtt:
+    version: "*"
+  espressif/cjson:
+    version: "^1.7.19"

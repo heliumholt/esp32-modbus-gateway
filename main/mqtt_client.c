@@ -3,19 +3,25 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "mqtt_client.h"
+#include "mqtt_client.h"       /* ESP-MQTT library (managed component) */
+#include "app_mqtt.h"          /* local function declarations */
 #include "nvs_config.h"
 
 static const char *TAG = "mqtt";
 
 static esp_mqtt_client_handle_t s_client = NULL;
 static mqtt_data_cb_t s_data_cb = NULL;
+static mqtt_ota_cb_t  s_ota_cb  = NULL;
 static volatile bool s_connected = false;
 
 /* Resolved topic strings (with {dev} replaced) */
 static char s_topic_data[64];
 static char s_topic_write[64];
 static char s_topic_status[64];
+static char s_topic_ota[64];
+
+/* OTA topic template — can be overridden via Kconfig */
+#define OTA_TOPIC_TEMPLATE  "{dev}/ota"
 
 /* ================================================================
  * Topic substitution
@@ -62,6 +68,10 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         /* Subscribe to write topic */
         ESP_LOGI(TAG, "Subscribing to: %s", s_topic_write);
         esp_mqtt_client_subscribe(s_client, s_topic_write, 1);
+
+        /* Subscribe to OTA topic */
+        ESP_LOGI(TAG, "Subscribing to: %s", s_topic_ota);
+        esp_mqtt_client_subscribe(s_client, s_topic_ota, 1);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -82,6 +92,14 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                     s_data_cb(ev->topic, ev->data, ev->data_len);
                 }
             }
+
+            /* Check if this is an OTA command */
+            if (strncmp(ev->topic, s_topic_ota, ev->topic_len) == 0 &&
+                (size_t)ev->topic_len == strlen(s_topic_ota)) {
+                if (s_ota_cb) {
+                    s_ota_cb(ev->topic, ev->data, ev->data_len);
+                }
+            }
         }
         break;
 
@@ -98,7 +116,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
  * Public API
  * ================================================================ */
 
-esp_err_t mqtt_client_start(mqtt_data_cb_t on_data)
+esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
 {
     if (s_client) {
         ESP_LOGW(TAG, "MQTT client already started");
@@ -111,8 +129,10 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data)
     resolve_topic(cfg->mqtt_data_t, s_topic_data, sizeof(s_topic_data));
     resolve_topic(cfg->mqtt_write_t, s_topic_write, sizeof(s_topic_write));
     resolve_topic(cfg->mqtt_stat_t, s_topic_status, sizeof(s_topic_status));
+    resolve_topic(OTA_TOPIC_TEMPLATE, s_topic_ota, sizeof(s_topic_ota));
 
     s_data_cb = on_data;
+    s_ota_cb  = on_ota;
 
     /* Build broker URI */
     char uri[256];
@@ -150,8 +170,8 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data)
         return ret;
     }
 
-    ESP_LOGI(TAG, "MQTT client started: uri=%s, data_topic=%s, write_topic=%s",
-             uri, s_topic_data, s_topic_write);
+    ESP_LOGI(TAG, "MQTT client started: uri=%s, data=%s, write=%s, ota=%s",
+             uri, s_topic_data, s_topic_write, s_topic_ota);
     return ESP_OK;
 }
 

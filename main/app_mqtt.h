@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 /**
- * Callback type for incoming MQTT data messages.
+ * Callback type for incoming MQTT write-command messages.
  * @param topic  Topic the message arrived on.
  * @param data   Raw payload data.
  * @param len    Payload length in bytes.
@@ -16,11 +16,20 @@ extern "C" {
 typedef void (*mqtt_data_cb_t)(const char *topic, const char *data, int len);
 
 /**
- * Start MQTT client.
- * Connects to the configured broker, sets LWT, subscribes to write topic.
- * @param on_data  Callback for incoming write commands (on write topic).
+ * Callback type for incoming MQTT OTA messages.
+ * Same signature as data callback — receives topic + raw payload.
+ * Typical payload: {"url": "https://ota.example.com/fw.bin"}
  */
-esp_err_t mqtt_client_start(mqtt_data_cb_t on_data);
+typedef void (*mqtt_ota_cb_t)(const char *topic, const char *data, int len);
+
+/**
+ * Start MQTT client.
+ * Connects to the configured broker, sets LWT, subscribes to write + OTA topics.
+ *
+ * @param on_data  Callback for incoming write commands (on write topic).
+ * @param on_ota   Callback for incoming OTA commands (on OTA topic). May be NULL.
+ */
+esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota);
 
 /**
  * Stop MQTT client gracefully (publishes offline and disconnects).

@@ -30,6 +30,8 @@ esp_err_t pipeline_init(void)
     s_cmd_queue = xQueueCreate(CMD_QUEUE_LEN, sizeof(write_cmd_t));
     if (!s_cmd_queue) {
         ESP_LOGE(TAG, "Failed to create cmd_queue");
+        vQueueDelete(s_report_queue);
+        s_report_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -124,7 +126,7 @@ int pipeline_build_report_json(char *json_out, int max_len, int timeout_ms)
         json_len = max_len - 1;
     }
 
-    free(json_str);
+    cJSON_free(json_str);
     cJSON_Delete(root);
 
     return count;
