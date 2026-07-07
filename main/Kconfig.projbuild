@@ -1,0 +1,42 @@
+menu "ESP32S3 MODBUS Gateway Configuration"
+
+    config MODBUS_GW_WIFI_SSID
+        string "Default WiFi SSID"
+        default ""
+        help
+            Default STA WiFi SSID (empty = no default, use AP mode).
+
+    config MODBUS_GW_DEVICE_NAME
+        string "Device Name"
+        default "esp32s3_modbus"
+        help
+            Device name used in MQTT topics.
+
+    config MODBUS_GW_MQTT_URI
+        string "Default MQTT Broker URI"
+        default "mqtt://test.mosquitto.org"
+        help
+            Default MQTT broker URI (e.g. mqtt://192.168.1.100).
+
+    config MODBUS_GW_UART_TX
+        int "Default UART TX GPIO"
+        default 17
+        range 0 48
+        help
+            UART TX pin for MODBUS RS485 communication.
+
+    config MODBUS_GW_UART_RX
+        int "Default UART RX GPIO"
+        default 18
+        range 0 48
+        help
+            UART RX pin for MODBUS RS485 communication.
+
+    config MODBUS_GW_UART_DE
+        int "Default DE/RE GPIO"
+        default 21
+        range -1 48
+        help
+            RS485 DE/RE direction control pin. Set -1 to disable.
+
+endmenu

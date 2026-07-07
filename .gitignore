@@ -1,0 +1,30 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+*.pyc
+*.pyo
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Dependencies
+managed_components/
+dependencies.lock
+
+# Flash / size artifacts
+*.bin
+flasher_args.json
+flash_args
+*.map
+*.elf
+*.S

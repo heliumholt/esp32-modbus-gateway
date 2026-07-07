@@ -1,0 +1,306 @@
+#include <string.h>
+#include <stdio.h>
+#include "nvs_config.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+static const char *TAG = "nvs_cfg";
+
+/* NVS namespace and key names */
+#define NVS_NAMESPACE   "config"
+
+/* Single global RAM cache */
+static config_t g_config;
+
+/* -- helpers -- */
+static esp_err_t nvs_load_str(nvs_handle_t h, const char *key, char *dst, size_t max, const char *def)
+{
+    size_t len = max;
+    esp_err_t err = nvs_get_str(h, key, dst, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        strncpy(dst, def, max - 1);
+        dst[max - 1] = '\0';
+        return ESP_OK;
+    }
+    return err;
+}
+
+static esp_err_t nvs_load_u8(nvs_handle_t h, const char *key, uint8_t *dst, uint8_t def)
+{
+    esp_err_t err = nvs_get_u8(h, key, dst);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *dst = def;
+        return ESP_OK;
+    }
+    return err;
+}
+
+static esp_err_t nvs_load_u16(nvs_handle_t h, const char *key, uint16_t *dst, uint16_t def)
+{
+    esp_err_t err = nvs_get_u16(h, key, dst);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *dst = def;
+        return ESP_OK;
+    }
+    return err;
+}
+
+static esp_err_t nvs_load_u32(nvs_handle_t h, const char *key, uint32_t *dst, uint32_t def)
+{
+    esp_err_t err = nvs_get_u32(h, key, dst);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *dst = def;
+        return ESP_OK;
+    }
+    return err;
+}
+
+/* ================================================================
+ * Init
+ * ================================================================ */
+
+bool nvs_config_init(void)
+{
+    ESP_LOGI(TAG, "Loading configuration from NVS...");
+
+    /* Start with defaults */
+    memset(&g_config, 0, sizeof(g_config));
+    g_config.configd     = 1;   /* will be cleared if NVS is empty */
+    strcpy(g_config.dev_name,   CONFIG_MODBUS_GW_DEVICE_NAME);
+    g_config.ap_fallback = 1;
+    strcpy(g_config.mqtt_uri,    CONFIG_MODBUS_GW_MQTT_URI);
+    g_config.mqtt_port   = 1883;
+    strcpy(g_config.mqtt_data_t,  "{dev}/data");
+    strcpy(g_config.mqtt_write_t, "{dev}/write");
+    strcpy(g_config.mqtt_stat_t,  "{dev}/status");
+    g_config.baudrate     = 9600;
+    g_config.data_bits    = 8;
+    g_config.stop_bits    = 1;
+    g_config.parity       = 0;
+    g_config.tx_pin       = CONFIG_MODBUS_GW_UART_TX;
+    g_config.rx_pin       = CONFIG_MODBUS_GW_UART_RX;
+    g_config.de_pin       = CONFIG_MODBUS_GW_UART_DE;
+    g_config.poll_intv    = 5000;
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS config namespace not found, using defaults (first boot)");
+        g_config.configd = 0;
+        return false;
+    }
+
+    /* configd */
+    nvs_load_u8(h, "configd", &g_config.configd, 0);
+
+    /* Device */
+    nvs_load_str(h, "dev_name", g_config.dev_name, sizeof(g_config.dev_name), g_config.dev_name);
+
+    /* WiFi */
+    nvs_load_str(h, "wifi_ssid", g_config.wifi_ssid, sizeof(g_config.wifi_ssid), "");
+    nvs_load_str(h, "wifi_pass", g_config.wifi_pass, sizeof(g_config.wifi_pass), "");
+    nvs_load_u8(h, "ap_fb", &g_config.ap_fallback, 1);
+
+    /* MQTT */
+    nvs_load_str(h, "mqtt_uri",  g_config.mqtt_uri,  sizeof(g_config.mqtt_uri),  g_config.mqtt_uri);
+    nvs_load_u16(h, "mqtt_port", &g_config.mqtt_port, 1883);
+    nvs_load_str(h, "mqtt_user", g_config.mqtt_user, sizeof(g_config.mqtt_user), "");
+    nvs_load_str(h, "mqtt_pass", g_config.mqtt_pass, sizeof(g_config.mqtt_pass), "");
+    nvs_load_str(h, "mq_data_t", g_config.mqtt_data_t,  sizeof(g_config.mqtt_data_t),  g_config.mqtt_data_t);
+    nvs_load_str(h, "mq_writ_t", g_config.mqtt_write_t, sizeof(g_config.mqtt_write_t), g_config.mqtt_write_t);
+    nvs_load_str(h, "mq_stat_t", g_config.mqtt_stat_t,  sizeof(g_config.mqtt_stat_t),  g_config.mqtt_stat_t);
+
+    /* MODBUS */
+    nvs_load_u32(h, "baudrate",  &g_config.baudrate,  9600);
+    nvs_load_u8(h,  "data_bits", &g_config.data_bits, 8);
+    nvs_load_u8(h,  "stop_bits", &g_config.stop_bits, 1);
+    nvs_load_u8(h,  "parity",    &g_config.parity,    0);
+    nvs_load_u8(h,  "tx_pin",    &g_config.tx_pin,    CONFIG_MODBUS_GW_UART_TX);
+    nvs_load_u8(h,  "rx_pin",    &g_config.rx_pin,    CONFIG_MODBUS_GW_UART_RX);
+    nvs_load_u8(h,  "de_pin",    &g_config.de_pin,    CONFIG_MODBUS_GW_UART_DE);
+    nvs_load_str(h, "reg_list",  g_config.reg_list,   sizeof(g_config.reg_list),   "");
+
+    /* Polling */
+    nvs_load_u32(h, "poll_intv", &g_config.poll_intv, 5000);
+
+    /* Custom */
+    nvs_load_str(h, "custom1", g_config.custom1, sizeof(g_config.custom1), "");
+    nvs_load_str(h, "custom2", g_config.custom2, sizeof(g_config.custom2), "");
+    nvs_load_str(h, "custom3", g_config.custom3, sizeof(g_config.custom3), "");
+
+    nvs_close(h);
+
+    ESP_LOGI(TAG, "Config loaded: configd=%d, dev=%s, baud=%lu, tx=%d, rx=%d, de=%d",
+             g_config.configd, g_config.dev_name, g_config.baudrate,
+             g_config.tx_pin, g_config.rx_pin, g_config.de_pin);
+
+    return (g_config.configd == 1);
+}
+
+/* ================================================================
+ * Save
+ * ================================================================ */
+
+esp_err_t nvs_config_save(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for writing: %d", err);
+        return err;
+    }
+
+    g_config.configd = 1;
+
+    /* Write all fields */
+    nvs_set_u8(h,  "configd",    g_config.configd);
+    nvs_set_str(h, "dev_name",   g_config.dev_name);
+    nvs_set_str(h, "wifi_ssid",  g_config.wifi_ssid);
+    nvs_set_str(h, "wifi_pass",  g_config.wifi_pass);
+    nvs_set_u8(h,  "ap_fb",      g_config.ap_fallback);
+    nvs_set_str(h, "mqtt_uri",   g_config.mqtt_uri);
+    nvs_set_u16(h, "mqtt_port",  g_config.mqtt_port);
+    nvs_set_str(h, "mqtt_user",  g_config.mqtt_user);
+    nvs_set_str(h, "mqtt_pass",  g_config.mqtt_pass);
+    nvs_set_str(h, "mq_data_t",  g_config.mqtt_data_t);
+    nvs_set_str(h, "mq_writ_t",  g_config.mqtt_write_t);
+    nvs_set_str(h, "mq_stat_t",  g_config.mqtt_stat_t);
+    nvs_set_u32(h, "baudrate",   g_config.baudrate);
+    nvs_set_u8(h,  "data_bits",  g_config.data_bits);
+    nvs_set_u8(h,  "stop_bits",  g_config.stop_bits);
+    nvs_set_u8(h,  "parity",     g_config.parity);
+    nvs_set_u8(h,  "tx_pin",     g_config.tx_pin);
+    nvs_set_u8(h,  "rx_pin",     g_config.rx_pin);
+    nvs_set_u8(h,  "de_pin",     g_config.de_pin);
+    nvs_set_str(h, "reg_list",   g_config.reg_list);
+    nvs_set_u32(h, "poll_intv",  g_config.poll_intv);
+    nvs_set_str(h, "custom1",    g_config.custom1);
+    nvs_set_str(h, "custom2",    g_config.custom2);
+    nvs_set_str(h, "custom3",    g_config.custom3);
+
+    err = nvs_commit(h);
+    nvs_close(h);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Configuration saved to NVS");
+    } else {
+        ESP_LOGE(TAG, "Failed to commit NVS: %d", err);
+    }
+    return err;
+}
+
+/* ================================================================
+ * Reset
+ * ================================================================ */
+
+void nvs_config_reset(void)
+{
+    ESP_LOGW(TAG, "Resetting configuration...");
+    nvs_flash_erase_partition("nvs");
+    esp_restart();
+}
+
+/* ================================================================
+ * Accessors
+ * ================================================================ */
+
+const config_t *nvs_config_get(void)
+{
+    return &g_config;
+}
+
+/* ================================================================
+ * Individual setters (for web POST handler)
+ * ================================================================ */
+
+esp_err_t nvs_config_set_string(const char *key, const char *value)
+{
+    if (!key || !value) return ESP_ERR_INVALID_ARG;
+
+    if (strcmp(key, "dev_name") == 0) {
+        strncpy(g_config.dev_name, value, sizeof(g_config.dev_name) - 1);
+    } else if (strcmp(key, "wifi_ssid") == 0) {
+        strncpy(g_config.wifi_ssid, value, sizeof(g_config.wifi_ssid) - 1);
+    } else if (strcmp(key, "wifi_pass") == 0) {
+        strncpy(g_config.wifi_pass, value, sizeof(g_config.wifi_pass) - 1);
+    } else if (strcmp(key, "mqtt_uri") == 0) {
+        strncpy(g_config.mqtt_uri, value, sizeof(g_config.mqtt_uri) - 1);
+    } else if (strcmp(key, "mqtt_user") == 0) {
+        strncpy(g_config.mqtt_user, value, sizeof(g_config.mqtt_user) - 1);
+    } else if (strcmp(key, "mqtt_pass") == 0) {
+        strncpy(g_config.mqtt_pass, value, sizeof(g_config.mqtt_pass) - 1);
+    } else if (strcmp(key, "mqtt_data_t") == 0) {
+        strncpy(g_config.mqtt_data_t, value, sizeof(g_config.mqtt_data_t) - 1);
+    } else if (strcmp(key, "mqtt_write_t") == 0) {
+        strncpy(g_config.mqtt_write_t, value, sizeof(g_config.mqtt_write_t) - 1);
+    } else if (strcmp(key, "mqtt_stat_t") == 0) {
+        strncpy(g_config.mqtt_stat_t, value, sizeof(g_config.mqtt_stat_t) - 1);
+    } else if (strcmp(key, "reg_list") == 0) {
+        strncpy(g_config.reg_list, value, sizeof(g_config.reg_list) - 1);
+    } else if (strcmp(key, "custom1") == 0) {
+        strncpy(g_config.custom1, value, sizeof(g_config.custom1) - 1);
+    } else if (strcmp(key, "custom2") == 0) {
+        strncpy(g_config.custom2, value, sizeof(g_config.custom2) - 1);
+    } else if (strcmp(key, "custom3") == 0) {
+        strncpy(g_config.custom3, value, sizeof(g_config.custom3) - 1);
+    } else {
+        ESP_LOGW(TAG, "Unknown string config key: %s", key);
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
+}
+
+esp_err_t nvs_config_set_u8(const char *key, uint8_t value)
+{
+    if (!key) return ESP_ERR_INVALID_ARG;
+
+    if (strcmp(key, "ap_fallback") == 0) {
+        g_config.ap_fallback = value;
+    } else if (strcmp(key, "data_bits") == 0) {
+        g_config.data_bits = value;
+    } else if (strcmp(key, "stop_bits") == 0) {
+        g_config.stop_bits = value;
+    } else if (strcmp(key, "parity") == 0) {
+        g_config.parity = value;
+    } else if (strcmp(key, "tx_pin") == 0) {
+        g_config.tx_pin = value;
+    } else if (strcmp(key, "rx_pin") == 0) {
+        g_config.rx_pin = value;
+    } else if (strcmp(key, "de_pin") == 0) {
+        g_config.de_pin = value;
+    } else {
+        ESP_LOGW(TAG, "Unknown u8 config key: %s", key);
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
+}
+
+esp_err_t nvs_config_set_u16(const char *key, uint16_t value)
+{
+    if (!key) return ESP_ERR_INVALID_ARG;
+
+    if (strcmp(key, "mqtt_port") == 0) {
+        g_config.mqtt_port = value;
+    } else {
+        ESP_LOGW(TAG, "Unknown u16 config key: %s", key);
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
+}
+
+esp_err_t nvs_config_set_u32(const char *key, uint32_t value)
+{
+    if (!key) return ESP_ERR_INVALID_ARG;
+
+    if (strcmp(key, "baudrate") == 0) {
+        g_config.baudrate = value;
+    } else if (strcmp(key, "poll_intv") == 0) {
+        g_config.poll_intv = value;
+    } else {
+        ESP_LOGW(TAG, "Unknown u32 config key: %s", key);
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
+}
