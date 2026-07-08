@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -16,11 +17,11 @@
 static const char *TAG = "wifi_mgr";
 
 #define MAX_STA_RETRIES      5
-#define STA_CONNECT_TIMEOUT_MS  30000
 
 static EventGroupHandle_t s_wifi_events;
 static wifi_state_t s_state = WIFI_STATE_AP_MODE;
 static int s_sta_retry_count = 0;
+static TimerHandle_t s_mode_switch_timer = NULL;
 
 /* Forward declarations */
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -29,6 +30,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
                              int32_t event_id, void *event_data);
 static void start_ap_mode(void);
 static void start_sta_mode(void);
+static void mode_switch_timer_cb(TimerHandle_t timer);
 
 /* ================================================================
  * Public
@@ -70,17 +72,15 @@ void wifi_manager_on_config_saved(void)
     ESP_LOGI(TAG, "Config saved, transitioning to STA mode");
     xEventGroupSetBits(s_wifi_events, WIFI_EVENT_CONFIG_SAVED);
 
-    /* Stop AP services */
-    web_server_stop();
-
-    /* Stop WiFi before switching modes */
-    esp_wifi_stop();
-    esp_wifi_disconnect();
-
-    /* Small delay to let WiFi settle */
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    start_sta_mode();
+    /* Defer the actual mode switch — HTTP response already sent.
+     * 300ms timer lets TCP flush before we tear down WiFi. */
+    if (!s_mode_switch_timer) {
+        s_mode_switch_timer = xTimerCreate("mode_sw", pdMS_TO_TICKS(300),
+                                            pdFALSE, NULL, mode_switch_timer_cb);
+    }
+    if (s_mode_switch_timer) {
+        xTimerStart(s_mode_switch_timer, 0);
+    }
 }
 
 wifi_state_t wifi_manager_get_state(void)
@@ -176,32 +176,23 @@ static void start_sta_mode(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
     s_state = WIFI_STATE_STA_CONNECTING;
+    s_sta_retry_count = 0;
     ESP_LOGI(TAG, "STA connecting to SSID: %s", config->wifi_ssid);
 
-    /* Retry loop — connection handled here exclusively (event handler
-     * does NOT retry during CONNECTING to avoid double-connect races) */
-    for (int attempt = 0; attempt < MAX_STA_RETRIES; attempt++) {
-        esp_wifi_connect();
+    esp_wifi_connect();
+    /* Non-blocking — event handlers manage retry + fallback */
+}
 
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-                             WIFI_EVENT_GOT_IP | WIFI_EVENT_DISCONNECTED,
-                             pdTRUE, pdFALSE,
-                             pdMS_TO_TICKS(STA_CONNECT_TIMEOUT_MS));
-
-        if (bits & WIFI_EVENT_GOT_IP) {
-            s_state = WIFI_STATE_STA_READY;
-            s_sta_retry_count = 0;
-            ESP_LOGI(TAG, "STA connected successfully");
-            return;
-        }
-
-        ESP_LOGW(TAG, "STA connect failed (attempt %d/%d)", attempt + 1, MAX_STA_RETRIES);
-        vTaskDelay(pdMS_TO_TICKS(2000));  /* brief backoff before retry */
-    }
-
-    ESP_LOGW(TAG, "Max STA retries reached, falling back to AP mode");
+/* Timer callback: deferred mode switch (300ms after HTTP response) */
+static void mode_switch_timer_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    ESP_LOGI(TAG, "Mode switch timer fired — switching to STA");
+    web_server_stop();
     esp_wifi_stop();
-    start_ap_mode();
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    start_sta_mode();
 }
 
 /* ================================================================
@@ -239,8 +230,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 start_ap_mode();
             }
         } else if (s_state == WIFI_STATE_STA_CONNECTING) {
-            /* start_sta_mode's retry loop handles reconnection —
-             * don't double-connect from the event handler */
+            /* Retry with backoff — event handler owns the retry loop */
+            s_sta_retry_count++;
+            if (s_sta_retry_count < MAX_STA_RETRIES || !nvs_config_get()->ap_fallback) {
+                int delay = (1 << s_sta_retry_count) * 1000;
+                if (delay > 15000) delay = 15000;
+                ESP_LOGI(TAG, "Connect failed, retry in %d ms (%d/%d)",
+                         delay, s_sta_retry_count, MAX_STA_RETRIES);
+                vTaskDelay(pdMS_TO_TICKS(delay));
+                esp_wifi_connect();
+            } else {
+                ESP_LOGW(TAG, "Max connect retries reached, falling back to AP mode");
+                esp_wifi_stop();
+                start_ap_mode();
+            }
         }
         break;
     }
@@ -264,6 +267,8 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
     if (event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&ev->ip_info.ip));
+        s_state = WIFI_STATE_STA_READY;
+        s_sta_retry_count = 0;
         xEventGroupSetBits(s_wifi_events, WIFI_EVENT_GOT_IP);
         led_indicator_set(LED_STATE_STA_READY);
 
