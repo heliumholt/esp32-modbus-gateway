@@ -178,28 +178,30 @@ static void start_sta_mode(void)
     s_state = WIFI_STATE_STA_CONNECTING;
     ESP_LOGI(TAG, "STA connecting to SSID: %s", config->wifi_ssid);
 
-    esp_wifi_connect();
+    /* Retry loop — connection handled here exclusively (event handler
+     * does NOT retry during CONNECTING to avoid double-connect races) */
+    for (int attempt = 0; attempt < MAX_STA_RETRIES; attempt++) {
+        esp_wifi_connect();
 
-    /* Wait for connection with timeout */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-                         WIFI_EVENT_GOT_IP | WIFI_EVENT_DISCONNECTED,
-                         pdTRUE, pdFALSE,
-                         pdMS_TO_TICKS(STA_CONNECT_TIMEOUT_MS));
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
+                             WIFI_EVENT_GOT_IP | WIFI_EVENT_DISCONNECTED,
+                             pdTRUE, pdFALSE,
+                             pdMS_TO_TICKS(STA_CONNECT_TIMEOUT_MS));
 
-    if (bits & WIFI_EVENT_GOT_IP) {
-        s_state = WIFI_STATE_STA_READY;
-        s_sta_retry_count = 0;
-        ESP_LOGI(TAG, "STA connected successfully");
-    } else {
-        ESP_LOGW(TAG, "STA connection timed out, retries: %d/%d",
-                 s_sta_retry_count, MAX_STA_RETRIES);
-        s_sta_retry_count++;
-        if (s_sta_retry_count >= MAX_STA_RETRIES) {
-            ESP_LOGW(TAG, "Max STA retries reached, falling back to AP mode");
-            esp_wifi_stop();
-            start_ap_mode();
+        if (bits & WIFI_EVENT_GOT_IP) {
+            s_state = WIFI_STATE_STA_READY;
+            s_sta_retry_count = 0;
+            ESP_LOGI(TAG, "STA connected successfully");
+            return;
         }
+
+        ESP_LOGW(TAG, "STA connect failed (attempt %d/%d)", attempt + 1, MAX_STA_RETRIES);
+        vTaskDelay(pdMS_TO_TICKS(2000));  /* brief backoff before retry */
     }
+
+    ESP_LOGW(TAG, "Max STA retries reached, falling back to AP mode");
+    esp_wifi_stop();
+    start_ap_mode();
 }
 
 /* ================================================================
@@ -237,8 +239,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 start_ap_mode();
             }
         } else if (s_state == WIFI_STATE_STA_CONNECTING) {
-            /* Connection attempt during initial STA start failed */
-            esp_wifi_connect(); /* retry */
+            /* start_sta_mode's retry loop handles reconnection —
+             * don't double-connect from the event handler */
         }
         break;
     }
