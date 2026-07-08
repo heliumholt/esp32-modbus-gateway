@@ -137,6 +137,9 @@ static void start_ap_mode(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /* Disable WiFi power save */
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     ESP_LOGI(TAG, "AP started: SSID=%s, IP=192.168.4.1", wifi_config.ap.ssid);
     led_indicator_set(LED_STATE_AP_MODE);
 
@@ -167,13 +170,16 @@ static void start_sta_mode(void)
     wifi_config_t wifi_config = {0};
     strncpy((char *)wifi_config.sta.ssid, config->wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char *)wifi_config.sta.password, config->wifi_pass, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.capable = false;
     wifi_config.sta.pmf_cfg.required = false;
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* Disable WiFi power save — prevents auth expiry disconnects on enterprise APs */
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     s_state = WIFI_STATE_STA_CONNECTING;
     ESP_LOGI(TAG, "STA connecting to SSID: %s", config->wifi_ssid);
