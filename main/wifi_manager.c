@@ -16,7 +16,6 @@
 static const char *TAG = "wifi_mgr";
 
 #define MAX_STA_RETRIES      5
-#define STA_CONNECT_TIMEOUT_MS  30000
 
 static EventGroupHandle_t s_wifi_events;
 static wifi_state_t s_state = WIFI_STATE_AP_MODE;
@@ -172,11 +171,15 @@ static void start_sta_mode(void)
     strncpy((char *)wifi_config.sta.password, config->wifi_pass, sizeof(wifi_config.sta.password) - 1);
     wifi_config.sta.pmf_cfg.capable = false;
     wifi_config.sta.pmf_cfg.required = false;
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    /* Don't restrict authmode — let AP negotiate */
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* Limit to b/g/n (no ax/11ax which can confuse enterprise APs) */
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
     /* Disable WiFi power save — prevents auth expiry disconnects on enterprise APs */
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -185,27 +188,7 @@ static void start_sta_mode(void)
     ESP_LOGI(TAG, "STA connecting to SSID: %s", config->wifi_ssid);
 
     esp_wifi_connect();
-
-    /* Wait for connection with timeout */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_events,
-                         WIFI_EVENT_GOT_IP | WIFI_EVENT_DISCONNECTED,
-                         pdTRUE, pdFALSE,
-                         pdMS_TO_TICKS(STA_CONNECT_TIMEOUT_MS));
-
-    if (bits & WIFI_EVENT_GOT_IP) {
-        s_state = WIFI_STATE_STA_READY;
-        s_sta_retry_count = 0;
-        ESP_LOGI(TAG, "STA connected successfully");
-    } else {
-        ESP_LOGW(TAG, "STA connection timed out, retries: %d/%d",
-                 s_sta_retry_count, MAX_STA_RETRIES);
-        s_sta_retry_count++;
-        if (s_sta_retry_count >= MAX_STA_RETRIES) {
-            ESP_LOGW(TAG, "Max STA retries reached, falling back to AP mode");
-            esp_wifi_stop();
-            start_ap_mode();
-        }
-    }
+    /* Connection handled asynchronously by event handlers */
 }
 
 /* ================================================================
@@ -243,8 +226,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 start_ap_mode();
             }
         } else if (s_state == WIFI_STATE_STA_CONNECTING) {
-            /* Connection attempt during initial STA start failed */
-            esp_wifi_connect(); /* retry */
+            /* Connection attempt failed — retry with backoff or fallback */
+            s_sta_retry_count++;
+            if (s_sta_retry_count < MAX_STA_RETRIES || !nvs_config_get()->ap_fallback) {
+                int delay = (1 << s_sta_retry_count) * 1000;
+                if (delay > 15000) delay = 15000;
+                ESP_LOGI(TAG, "Connect failed, retry in %d ms (%d/%d)",
+                         delay, s_sta_retry_count, MAX_STA_RETRIES);
+                vTaskDelay(pdMS_TO_TICKS(delay));
+                esp_wifi_connect();
+            } else {
+                ESP_LOGW(TAG, "Max connect retries reached, falling back to AP mode");
+                esp_wifi_stop();
+                start_ap_mode();
+            }
         }
         break;
     }
