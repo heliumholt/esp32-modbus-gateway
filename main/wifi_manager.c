@@ -11,6 +11,7 @@
 #include "wifi_manager.h"
 #include "nvs_config.h"
 #include "web_server.h"
+#include "led_indicator.h"
 
 static const char *TAG = "wifi_mgr";
 
@@ -59,6 +60,7 @@ void wifi_manager_init(void)
         start_sta_mode();
     } else {
         ESP_LOGI(TAG, "No config, starting AP mode for configuration");
+        led_indicator_set(LED_STATE_AP_MODE);
         start_ap_mode();
     }
 }
@@ -136,6 +138,7 @@ static void start_ap_mode(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "AP started: SSID=%s, IP=192.168.4.1", wifi_config.ap.ssid);
+    led_indicator_set(LED_STATE_AP_MODE);
 
     /* Start captive portal */
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -209,6 +212,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     switch (event_id) {
     case WIFI_EVENT_STA_START:
         ESP_LOGI(TAG, "STA started");
+        led_indicator_set(LED_STATE_STA_CONNECTING);
         break;
 
     case WIFI_EVENT_STA_DISCONNECTED: {
@@ -259,5 +263,10 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         xEventGroupSetBits(s_wifi_events, WIFI_EVENT_GOT_IP);
+        led_indicator_set(LED_STATE_STA_READY);
+
+        /* Start web config page on STA IP (no DNS captive portal in STA mode) */
+        web_server_start();
+        ESP_LOGI(TAG, "Web config available at http://" IPSTR, IP2STR(&ev->ip_info.ip));
     }
 }

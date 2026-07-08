@@ -46,7 +46,8 @@ No tests exist yet — all verification is done on hardware.
 | MQTT Publisher | 0 | 4 | Drains `report_queue` → builds JSON → publishes |
 | MODBUS Poll | 1 | 5 | Polls registers, drains `cmd_queue` for writes |
 | OTA Handler | 0 | 2 | Blocks on queue → downloads firmware → reboots |
-| Factory Reset | 0 | 1 | Polls button GPIO, triggers NVS erase on 3s hold |
+| Factory Reset | 0 | 1 | Polls button GPIO, triggers NVS erase on 5s hold |
+| LED Indicator | 0 | 1 | WS2812 RMT driver, 25Hz pattern engine (GPIO 38) |
 | (MQTT internal) | 0 | 5 | `esp-mqtt` library task |
 
 ### Data flow
@@ -90,6 +91,21 @@ MODBUS Slave ←RS485→ UART1 ←→ modbus_master ←→ modbus_poll_task(Core
 - **`ota_handler.c`** — OTA firmware update module. `ota_request(url)` posts a URL to an internal queue (depth 1). The OTA task downloads via `esp_https_ota()`, writes to the inactive OTA partition, and reboots. Status messages are forwarded to MQTT via a callback.
 - **`web_config.html`** — Self-contained (<8KB) config page with inline CSS/JS. Loads current config via `GET /api/config`, saves via `POST /save`. Dynamically builds register list rows. Uses `{dev}` topic template placeholder.
 - **`modbus_params.c`** — Parses register list string format `"slave,fc,start,count;..."` into `register_entry_t[]` array (max 32 entries).
+- **`led_indicator.c`** — WS2812 RGB LED on GPIO 38 driven by RMT peripheral. Background task at 25Hz evaluates current state→color pattern mapping. Other modules call `led_indicator_set()` to signal state changes.
+
+### LED indicator states (WS2812 on GPIO 38)
+
+| State | Color | Pattern | Trigger |
+|-------|-------|---------|---------|
+| `LED_STATE_OFF` | ⚫ Off | — | Initial / idle |
+| `LED_STATE_AP_MODE` | 🟡 Yellow | 1s on/off | AP started, awaiting config |
+| `LED_STATE_STA_CONNECTING` | 🔵 Blue | 200ms blink | STA connecting to WiFi |
+| `LED_STATE_STA_READY` | 🔵 Cyan | Breathe | WiFi connected, MQTT pending |
+| `LED_STATE_MQTT_CONNECTED` | 🟢 Green | Solid | MQTT broker connected |
+| `LED_STATE_MODBUS_ERR` | 🔴 Red | 120ms single flash | MODBUS poll error |
+| `LED_STATE_OTA_PROGRESS` | 🟣 Purple | 1.5s pulse | OTA download in progress |
+| `LED_STATE_OTA_SUCCESS` | 🟢 Green | 3× blink | OTA done, rebooting |
+| `LED_STATE_FACTORY_RESET` | 🔴 Red | 100ms fast blink | Factory reset triggered |
 
 ### NVS config schema
 

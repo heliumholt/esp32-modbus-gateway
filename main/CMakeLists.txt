@@ -11,6 +11,7 @@ idf_component_register(
         "mqtt_client.c"
         "data_pipeline.c"
         "ota_handler.c"
+        "led_indicator.c"
     INCLUDE_DIRS
         "."
     EMBED_FILES
@@ -26,6 +27,7 @@ idf_component_register(
         driver
         esp_driver_uart
         esp_driver_gpio
+        esp_driver_rmt
         lwip
         spi_flash
         esp_https_ota
@@ -47,5 +49,6 @@ set_source_files_properties(
     mqtt_client.c
     data_pipeline.c
     ota_handler.c
+    led_indicator.c
     PROPERTIES COMPILE_OPTIONS "-Os"
 )

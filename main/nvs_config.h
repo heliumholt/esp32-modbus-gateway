@@ -95,13 +95,22 @@ void nvs_config_reset(void);
 const config_t *nvs_config_get(void);
 
 /**
- * Individual setters — update RAM cache and immediately write to NVS.
+ * Individual setters — update RAM cache only.
+ * Call nvs_config_save() to persist to NVS.
  * Used by the web server POST handler.
  */
 esp_err_t nvs_config_set_string(const char *key, const char *value);
 esp_err_t nvs_config_set_u8(const char *key, uint8_t value);
 esp_err_t nvs_config_set_u16(const char *key, uint16_t value);
 esp_err_t nvs_config_set_u32(const char *key, uint32_t value);
+
+/**
+ * Lock/unlock the configuration mutex.
+ * Web POST handler should lock before the setter loop and unlock after
+ * to prevent cross-core data races on the g_config RAM cache.
+ */
+void nvs_config_lock(void);
+void nvs_config_unlock(void);
 
 #ifdef __cplusplus
 }

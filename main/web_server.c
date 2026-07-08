@@ -9,6 +9,8 @@
 #include "nvs_config.h"
 #include "wifi_manager.h"
 #include "dns_responder.h"
+#include "modbus_params.h"
+#include "esp_timer.h"
 
 static const char *TAG = "web_srv";
 
@@ -63,10 +65,89 @@ static esp_err_t handle_get_config(httpd_req_t *req)
     cJSON_AddStringToObject(root, "custom3",    cfg->custom3);
 
     char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json_str) {
+        ESP_LOGE(TAG, "Failed to serialize config JSON (OOM)");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_str, strlen(json_str));
     cJSON_free(json_str);
+    return ESP_OK;
+}
+
+/* GET /api/payload-preview — generate sample MQTT payload */
+static esp_err_t handle_payload_preview(httpd_req_t *req)
+{
+    const config_t *cfg = nvs_config_get();
+
+    /* Resolve topic: replace {dev} with device name */
+    char topic[128];
+    const char *tpl = cfg->mqtt_data_t;
+    char *dst = topic;
+    const char *end = topic + sizeof(topic) - 1;
+    while (*tpl && dst < end) {
+        if (strncmp(tpl, "{dev}", 5) == 0) {
+            size_t n = strlen(cfg->dev_name);
+            if (dst + n > end) n = end - dst;
+            memcpy(dst, cfg->dev_name, n);
+            dst += n;
+            tpl += 5;
+        } else {
+            *dst++ = *tpl++;
+        }
+    }
+    *dst = '\0';
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "topic", topic);
+
+    /* Build sample payload */
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddNumberToObject(payload, "ts", (double)(esp_timer_get_time() / 1000));
+
+    /* Parse register list and add sample entries */
+    cJSON *regs = cJSON_CreateObject();
+    if (strlen(cfg->reg_list) > 0) {
+        register_entry_t entries[MODBUS_MAX_ENTRIES];
+        int count = modbus_params_parse(cfg->reg_list, entries, MODBUS_MAX_ENTRIES);
+        for (int i = 0; i < count && i < MODBUS_MAX_ENTRIES; i++) {
+            for (int j = 0; j < entries[i].count && j < 8; j++) {  /* limit 8 per group */
+                char key[32];
+                snprintf(key, sizeof(key), "s%d:%d",
+                         entries[i].slave_addr,
+                         entries[i].start_reg + j);
+                /* Use placeholder values: sequential starting from reg address */
+                cJSON_AddNumberToObject(regs, key, (double)(entries[i].start_reg + j + 1000));
+            }
+            if (entries[i].count > 8) {
+                char key[32];
+                snprintf(key, sizeof(key), "s%d:...(+%d more)",
+                         entries[i].slave_addr,
+                         entries[i].count - 8);
+                cJSON_AddStringToObject(regs, key, "...");
+            }
+        }
+    } else {
+        /* No reg_list configured — show example */
+        cJSON_AddNumberToObject(regs, "s1:30001", 31001);
+        cJSON_AddNumberToObject(regs, "s1:30002", 31002);
+        cJSON_AddNumberToObject(regs, "s1:30003", 31003);
+    }
+    cJSON_AddItemToObject(payload, "regs", regs);
+    cJSON_AddItemToObject(root, "payload", payload);
+
+    char *json_str = cJSON_Print(root);  /* pretty-print for readability */
     cJSON_Delete(root);
+    if (!json_str) {
+        ESP_LOGE(TAG, "Failed to serialize payload preview (OOM)");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    cJSON_free(json_str);
     return ESP_OK;
 }
 
@@ -83,7 +164,8 @@ static esp_err_t handle_post_save(httpd_req_t *req)
     ESP_LOGI(TAG, "POST /save body: %s", buf);
 
     /* Parse URL-encoded form data: key1=val1&key2=val2... */
-    char *saveptr;
+    nvs_config_lock();
+    char *saveptr = NULL;
     char *pair = strtok_r(buf, "&", &saveptr);
     while (pair) {
         char *eq = strchr(pair, '=');
@@ -92,21 +174,35 @@ static esp_err_t handle_post_save(httpd_req_t *req)
             char *key = pair;
             char *val = eq + 1;
 
-            /* URL decode (basic: replace + with space) */
-            for (char *p = val; *p; p++) {
-                if (*p == '+') *p = ' ';
+            /* URL-decode: + → space, %XX → byte */
+            char *src = val;
+            char *dst = val;
+            while (*src) {
+                if (*src == '+') {
+                    *dst++ = ' ';
+                    src++;
+                } else if (*src == '%' && src[1] && src[2]) {
+                    char hex[3] = {src[1], src[2], '\0'};
+                    *dst++ = (char)strtol(hex, NULL, 16);
+                    src += 3;
+                } else {
+                    *dst++ = *src++;
+                }
             }
+            *dst = '\0';
 
-            /* Try to set as number first, then string */
-            char *endptr;
-            long num = strtol(val, &endptr, 10);
-            if (*endptr == '\0' && val[0] != '\0') {
-                /* Numeric value */
-                nvs_config_set_u32(key, (uint32_t)num);
-                nvs_config_set_u16(key, (uint16_t)num);
-                nvs_config_set_u8(key, (uint8_t)num);
-            } else {
-                nvs_config_set_string(key, val);
+            /* Try string setter first — handles all text fields */
+            esp_err_t serr = nvs_config_set_string(key, val);
+
+            /* If not a string field, try numeric setters */
+            if (serr == ESP_ERR_NOT_FOUND) {
+                char *endptr;
+                long num = strtol(val, &endptr, 10);
+                if (*endptr == '\0' && val[0] != '\0') {
+                    nvs_config_set_u32(key, (uint32_t)num);
+                    nvs_config_set_u16(key, (uint16_t)num);
+                    nvs_config_set_u8(key, (uint8_t)num);
+                }
             }
         }
         pair = strtok_r(NULL, "&", &saveptr);
@@ -114,6 +210,7 @@ static esp_err_t handle_post_save(httpd_req_t *req)
 
     /* Persist to NVS */
     nvs_config_save();
+    nvs_config_unlock();
 
     /* Signal WiFi manager to switch modes */
     wifi_manager_on_config_saved();
@@ -139,6 +236,8 @@ static esp_err_t handle_captive_redirect(httpd_req_t *req)
 
 void web_server_start(void)
 {
+    if (s_server) return;  /* already running */
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 16;
     config.lru_purge_enable = true;
@@ -163,6 +262,14 @@ void web_server_start(void)
             .user_ctx = NULL,
         };
         httpd_register_uri_handler(s_server, &uri_config);
+
+        httpd_uri_t uri_preview = {
+            .uri = "/api/payload-preview",
+            .method = HTTP_GET,
+            .handler = handle_payload_preview,
+            .user_ctx = NULL,
+        };
+        httpd_register_uri_handler(s_server, &uri_preview);
 
         httpd_uri_t uri_save = {
             .uri = "/save",

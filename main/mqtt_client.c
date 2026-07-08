@@ -2,14 +2,17 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "mqtt_client.h"       /* ESP-MQTT library (managed component) */
 #include "app_mqtt.h"          /* local function declarations */
 #include "nvs_config.h"
+#include "led_indicator.h"
 
 static const char *TAG = "mqtt";
 
 static esp_mqtt_client_handle_t s_client = NULL;
+static SemaphoreHandle_t s_client_mutex = NULL;
 static mqtt_data_cb_t s_data_cb = NULL;
 static mqtt_ota_cb_t  s_ota_cb  = NULL;
 static volatile bool s_connected = false;
@@ -65,6 +68,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT connected to broker");
         s_connected = true;
+        led_indicator_set(LED_STATE_MQTT_CONNECTED);
 
         /* Publish birth message */
         mqtt_client_publish_status("online", 6);
@@ -81,6 +85,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
         s_connected = false;
+        led_indicator_set(LED_STATE_STA_READY);  /* back to WiFi-only state */
         break;
 
     case MQTT_EVENT_DATA:
@@ -122,6 +127,15 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 
 esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
 {
+    /* Create client mutex on first call (persists across stop/start cycles) */
+    if (!s_client_mutex) {
+        s_client_mutex = xSemaphoreCreateMutex();
+        if (!s_client_mutex) {
+            ESP_LOGE(TAG, "Failed to create client mutex");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     if (s_client) {
         ESP_LOGW(TAG, "MQTT client already started");
         return ESP_OK;
@@ -135,6 +149,15 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
     resolve_topic(cfg->mqtt_stat_t, s_topic_status, sizeof(s_topic_status));
     resolve_topic(OTA_TOPIC_TEMPLATE, s_topic_ota, sizeof(s_topic_ota));
 
+    /* Warn if any resolved topic was truncated */
+    size_t max_topic = sizeof(s_topic_data);
+    if (strlen(s_topic_data) >= max_topic - 1 ||
+        strlen(s_topic_write) >= max_topic - 1 ||
+        strlen(s_topic_status) >= max_topic - 1 ||
+        strlen(s_topic_ota) >= max_topic - 1) {
+        ESP_LOGW(TAG, "Topic truncated — device name or template too long (max %d chars)", max_topic - 1);
+    }
+
     s_data_cb = on_data;
     s_ota_cb  = on_ota;
 
@@ -142,9 +165,35 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
     s_topic_write_len = strlen(s_topic_write);
     s_topic_ota_len  = strlen(s_topic_ota);
 
-    /* Build broker URI */
+    /* Build broker URI — auto-prepend mqtt:// if no scheme present.
+     * Also strip an embedded :port from the hostname to avoid double-port. */
     char uri[256];
-    snprintf(uri, sizeof(uri), "%s:%d", cfg->mqtt_uri, cfg->mqtt_port);
+    const char *raw = cfg->mqtt_uri;
+    char host[224];
+    /* Copy raw to host, stripping trailing ":port" if present */
+    strncpy(host, raw, sizeof(host) - 1);
+    host[sizeof(host) - 1] = '\0';
+    char *colon = strrchr(host, ':');
+    if (colon && colon != host) {
+        /* Check preceding char isn't ':' (IPv6 like [::1]) or '/' (scheme://) */
+        char prev = *(colon - 1);
+        if (prev != ':' && prev != '/') {
+            *colon = '\0';  /* strip :port — use mqtt_port from config instead */
+        }
+    }
+
+    if (strncmp(host, "mqtt://", 7) == 0 ||
+        strncmp(host, "mqtts://", 8) == 0 ||
+        strncmp(host, "tcp://", 6) == 0 ||
+        strncmp(host, "ssl://", 6) == 0 ||
+        strncmp(host, "ws://", 5) == 0 ||
+        strncmp(host, "wss://", 6) == 0) {
+        /* Already has scheme — don't double it */
+        snprintf(uri, sizeof(uri), "%s:%d", host, cfg->mqtt_port);
+    } else {
+        snprintf(uri, sizeof(uri), "mqtt://%s:%d", host, cfg->mqtt_port);
+    }
+    ESP_LOGI(TAG, "MQTT broker URI: %s", uri);
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri,
@@ -170,12 +219,20 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
         return ESP_FAIL;
     }
 
-    ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY,
-                                                    mqtt_event_handler, NULL));
+    esp_err_t reg_err = esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY,
+                                                        mqtt_event_handler, NULL);
+    if (reg_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register MQTT event handler: %d", reg_err);
+        esp_mqtt_client_destroy(s_client);
+        s_client = NULL;
+        return reg_err;
+    }
 
     esp_err_t ret = esp_mqtt_client_start(s_client);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start MQTT client: %d", ret);
+        esp_mqtt_client_destroy(s_client);
+        s_client = NULL;
         return ret;
     }
 
@@ -186,16 +243,25 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
 
 esp_err_t mqtt_client_stop(void)
 {
-    if (!s_client) return ESP_OK;
+    if (!s_client_mutex) return ESP_OK;
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
 
-    /* Publish offline */
+    if (!s_client) {
+        xSemaphoreGive(s_client_mutex);
+        return ESP_OK;
+    }
+
+    /* Publish offline (publish_status locks internally — release first) */
+    xSemaphoreGive(s_client_mutex);
     mqtt_client_publish_status("offline", 7);
     vTaskDelay(pdMS_TO_TICKS(200));
 
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
     esp_mqtt_client_stop(s_client);
     esp_mqtt_client_destroy(s_client);
     s_client = NULL;
     s_connected = false;
+    xSemaphoreGive(s_client_mutex);
 
     ESP_LOGI(TAG, "MQTT client stopped");
     return ESP_OK;
@@ -203,8 +269,14 @@ esp_err_t mqtt_client_stop(void)
 
 esp_err_t mqtt_client_publish_data(const char *payload, int len)
 {
-    if (!s_client || !s_connected) return ESP_ERR_INVALID_STATE;
+    if (!s_client_mutex) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
+    if (!s_client || !s_connected) {
+        xSemaphoreGive(s_client_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     int msg_id = esp_mqtt_client_publish(s_client, s_topic_data, payload, len, 1, 0);
+    xSemaphoreGive(s_client_mutex);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Failed to publish data: %d", msg_id);
         return ESP_FAIL;
@@ -214,8 +286,14 @@ esp_err_t mqtt_client_publish_data(const char *payload, int len)
 
 esp_err_t mqtt_client_publish_status(const char *payload, int len)
 {
-    if (!s_client || !s_connected) return ESP_ERR_INVALID_STATE;
-    int msg_id = esp_mqtt_client_publish(s_client, s_topic_status, payload, len, 1, 1);
+    if (!s_client_mutex) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
+    if (!s_client || !s_connected) {
+        xSemaphoreGive(s_client_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic_status, payload, len, 1, 0);
+    xSemaphoreGive(s_client_mutex);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Failed to publish status: %d", msg_id);
         return ESP_FAIL;

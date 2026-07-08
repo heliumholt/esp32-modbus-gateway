@@ -22,6 +22,7 @@
 #include "ota_handler.h"
 #include "cJSON.h"
 #include "driver/gpio.h"
+#include "led_indicator.h"
 
 static const char *TAG = "main";
 
@@ -115,6 +116,8 @@ static void factory_reset_task(void *arg)
             hold++;
             if (hold >= RST_HOLD_THRESHOLD) {
                 ESP_LOGW(TAG, "Factory-reset triggered — erasing config and rebooting...");
+                led_indicator_set(LED_STATE_FACTORY_RESET);
+                vTaskDelay(pdMS_TO_TICKS(500));  /* let LED flash briefly */
                 nvs_config_reset();
                 /* nvs_config_reset() calls esp_restart() — never returns */
             }
@@ -159,6 +162,10 @@ static void mqtt_publisher_task(void *arg)
                     mqtt_started = true;
                     /* Wait a bit for MQTT connection */
                     vTaskDelay(pdMS_TO_TICKS(3000));
+                } else {
+                    /* Start failed — back off before retry */
+                    ESP_LOGW(TAG, "MQTT start failed, retrying in 10s...");
+                    vTaskDelay(pdMS_TO_TICKS(10000));
                 }
             }
 
@@ -209,9 +216,7 @@ static void modbus_poll_task(void *arg)
 
     ESP_LOGI(TAG, "MODBUS task waiting for system ready...");
 
-    const config_t *cfg = nvs_config_get();
-    TickType_t last_wake = xTaskGetTickCount();
-    TickType_t period = pdMS_TO_TICKS(cfg->poll_intv);
+    TickType_t last_wake = 0;  /* initialized on first modbus_init */
 
     while (1) {
         /* Wait for STA mode (GOT_IP) to be active */
@@ -251,8 +256,8 @@ static void modbus_poll_task(void *arg)
         }
 
         /* Refresh config (may have changed via web) */
-        cfg = nvs_config_get();
-        period = pdMS_TO_TICKS(cfg->poll_intv < 200 ? 200 : cfg->poll_intv);
+        const config_t *cfg = nvs_config_get();
+        TickType_t period = pdMS_TO_TICKS(cfg->poll_intv < 200 ? 200 : cfg->poll_intv);
 
         /* ============================================================
          * Poll loop: iterate all register entries
@@ -278,6 +283,7 @@ static void modbus_poll_task(void *arg)
             } else {
                 ESP_LOGW(TAG, "MODBUS read failed: slave=%d, fc=%d, addr=%d, err=%d",
                          e->slave_addr, e->fc, e->start_reg, err);
+                led_indicator_set(LED_STATE_MODBUS_ERR);
                 /* Continue to next entry — don't block the loop */
             }
 
@@ -336,10 +342,13 @@ void app_main(void)
     /* ------ 4. Create data pipeline (queues) ------ */
     ESP_ERROR_CHECK(pipeline_init());
 
-    /* ------ 5. Initialize OTA handler ------ */
+    /* ------ 5. Initialize LED indicator (WS2812 on GPIO 38) ------ */
+    ESP_ERROR_CHECK(led_indicator_init(38));
+
+    /* ------ 6. Initialize OTA handler ------ */
     ESP_ERROR_CHECK(ota_handler_init(ota_status_callback));
 
-    /* ------ 6. Log chip info ------ */
+    /* ------ 7. Log chip info ------ */
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     uint32_t flash_size = 0;
@@ -348,14 +357,15 @@ void app_main(void)
              chip_info.cores, chip_info.revision,
              flash_size / (1024 * 1024));
 
-    /* ------ 7. Start WiFi state machine FIRST — creates event group that tasks depend on ------ */
-    wifi_manager_init();
-
-    /* ------ 8. Factory-reset button monitor ------ */
+    /* ------ 8. Factory-reset button monitor (start before WiFi to ensure responsiveness) ------ */
     xTaskCreatePinnedToCore(factory_reset_task, "rst_btn", 2048, NULL, 1,
                             NULL, 0);
 
-    /* ------ 9. Create main tasks ------ */
+    /* ------ 9. Start WiFi state machine FIRST — creates event group that tasks depend on ------ */
+    /* NOTE: may block up to 30s during STA connect — factory-reset already running */
+    wifi_manager_init();
+
+    /* ------ 10. Create main tasks ------ */
     /* MODBUS poll task — pinned to Core 1 for real-time UART timing */
     xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
                             &s_modbus_task, 1);

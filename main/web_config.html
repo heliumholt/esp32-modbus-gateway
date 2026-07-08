@@ -27,6 +27,12 @@ input:focus,select:focus{outline:none;border-color:#4361ee;box-shadow:0 0 0 2px 
 #status{text-align:center;font-size:12px;color:#666;min-height:18px}
 #status.ok{color:#16a34a}
 #status.err{color:#ef4444}
+#preview_box{background:#1e1e2e;color:#cdd6f4;font:12px/1.4 "SF Mono","Cascadia Code",Consolas,monospace;padding:10px 12px;border-radius:6px;overflow-x:auto;max-height:320px;overflow-y:auto;white-space:pre;margin-top:6px}
+#preview_box .key{color:#89b4fa}
+#preview_box .num{color:#a6e3a1}
+#preview_box .str{color:#f9e2af}
+#preview_btn{font-size:12px;padding:4px 10px;background:#585b70;color:#cdd6f4;border:none;border-radius:4px;cursor:pointer;margin-top:4px}
+#preview_btn:hover{background:#6c7086}
 @media(max-width:380px){body{padding:6px}fieldset{padding:8px 10px}}
 </style>
 </head>
@@ -97,9 +103,9 @@ STA 失败时回退到 AP 模式
 <fieldset>
 <legend>串口引脚</legend>
 <div class="row">
-<div><label>TX GPIO</label><input name="tx_pin" type="number" min="0" max="48" value="17"></div>
-<div><label>RX GPIO</label><input name="rx_pin" type="number" min="0" max="48" value="18"></div>
-<div><label>DE/RE GPIO</label><input name="de_pin" type="number" min="-1" max="48" value="21"></div>
+<div><label>TX GPIO</label><input name="tx_pin" type="number" min="0" max="48" value="16"></div>
+<div><label>RX GPIO</label><input name="rx_pin" type="number" min="0" max="48" value="17"></div>
+<div><label>DE/RE GPIO</label><input name="de_pin" type="number" min="-1" max="48" value="8"></div>
 </div>
 <small style="color:#888">DE/RE 设为 -1 表示不启用 RS485 方向控制</small>
 </fieldset>
@@ -111,6 +117,11 @@ STA 失败时回退到 AP 模式
 <input name="custom2" maxlength="127" placeholder="可选">
 <label>自定义参数 3</label>
 <input name="custom3" maxlength="127" placeholder="可选">
+</fieldset>
+<fieldset>
+<legend>MQTT Payload 预览</legend>
+<button type="button" id="preview_btn" onclick="refreshPreview()">刷新预览</button>
+<div id="preview_box">点击刷新预览...</div>
 </fieldset>
 <button type="submit" id="submit_btn">保存配置</button>
 <div id="status"></div>
@@ -184,7 +195,84 @@ document.getElementById('cfg_form').addEventListener('submit',function(e){
     }).catch(function(){setStatus('保存请求失败, 请重试','err')});
 });
 
-document.addEventListener('DOMContentLoaded',loadConfig);
+/* ---- MQTT Payload Preview (client-side) ---- */
+
+function buildPreview(){
+  /* Resolve topic: replace {dev} with current device name */
+  var tpl=document.querySelector('[name="mqtt_data_t"]');
+  var dev=document.querySelector('[name="dev_name"]');
+  var tplVal=(tpl&&tpl.value)||'{dev}/data';
+  var devName=(dev&&dev.value)||'my_device';
+  var topic=tplVal.replace(/\{dev\}/g,devName);
+
+  /* Build register map from the dynamic rows */
+  buildRegList();
+  var regList=document.getElementById('reg_list_hidden').value;
+  var regs={};
+  if(regList){
+    regList.split(';').forEach(function(entry){
+      var p=entry.split(',');
+      if(p.length!==4)return;
+      var slave=p[0], start=parseInt(p[2]), count=parseInt(p[3]);
+      var shown=Math.min(count,8);
+      for(var i=0;i<shown;i++){
+        regs['s'+slave+':'+(start+i)]='<'+(start+i+1000)+'>';
+      }
+      if(count>8)regs['s'+slave+':...(+'+(count-8)+' more)']='...';
+    });
+  }
+  /* Fallback: example registers */
+  if(Object.keys(regs).length===0){
+    regs={'s1:30001':'<31001>','s1:30002':'<31002>','s1:30003':'<31003>'};
+  }
+
+  var payload={ts:'<timestamp_ms>',regs:regs};
+  var json=JSON.stringify(payload,null,2);
+
+  return {topic:topic, json:json};
+}
+
+function refreshPreview(){
+  var p=buildPreview();
+  var box=document.getElementById('preview_box');
+  box.innerHTML='<span style="color:#6c7086">// 发布主题</span>\n'+
+    '<span style="color:#f5c2e7">'+escHtml(p.topic)+'</span>\n\n'+
+    '<span style="color:#6c7086">// Payload JSON</span>\n'+
+    syntaxJson(p.json);
+}
+
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function syntaxJson(json){
+  return json.replace(/("(?:[^"\\]|\\.)*")\s*:/g,'<span class="key">$1</span>:')
+    .replace(/: "(&lt;[\d+]+&gt;|\.\.\.)"/g,': <span class="num">$1</span>')
+    .replace(/: (&lt;timestamp_ms&gt;)/g,': <span class="num">$1</span>')
+    .replace(/: "(.*?)"/g,': <span class="str">"$1"</span>');
+}
+
+/* Debounced auto-refresh on any form input change */
+var _ptimer=null;
+document.getElementById('cfg_form').addEventListener('input',function(e){
+  clearTimeout(_ptimer);
+  _ptimer=setTimeout(refreshPreview,500);
+});
+/* Also refresh when reg rows are added/removed */
+document.getElementById('add_btn').addEventListener('click',function(){
+  clearTimeout(_ptimer);
+  _ptimer=setTimeout(refreshPreview,300);
+});
+document.getElementById('reg_list_container').addEventListener('click',function(e){
+  if(e.target.tagName==='BUTTON'){
+    clearTimeout(_ptimer);
+    _ptimer=setTimeout(refreshPreview,300);
+  }
+});
+
+/* Init */
+document.addEventListener('DOMContentLoaded',function(){
+  loadConfig();
+  setTimeout(refreshPreview,600);
+});
 </script>
 </body>
 </html>

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "nvs_config.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -13,8 +14,9 @@ static const char *TAG = "nvs_cfg";
 /* NVS namespace and key names */
 #define NVS_NAMESPACE   "config"
 
-/* Single global RAM cache */
+/* Single global RAM cache — protected by s_cfg_mutex (dual-core access) */
 static config_t g_config;
+static SemaphoreHandle_t s_cfg_mutex = NULL;
 
 /* -- helpers -- */
 static esp_err_t nvs_load_str(nvs_handle_t h, const char *key, char *dst, size_t max, const char *def)
@@ -66,6 +68,12 @@ static esp_err_t nvs_load_u32(nvs_handle_t h, const char *key, uint32_t *dst, ui
 bool nvs_config_init(void)
 {
     ESP_LOGI(TAG, "Loading configuration from NVS...");
+
+    /* Create mutex for config access (dual-core protection) */
+    s_cfg_mutex = xSemaphoreCreateMutex();
+    if (!s_cfg_mutex) {
+        ESP_LOGE(TAG, "Failed to create config mutex");
+    }
 
     /* Start with defaults */
     memset(&g_config, 0, sizeof(g_config));
@@ -127,6 +135,9 @@ bool nvs_config_init(void)
 
     /* Polling */
     nvs_load_u32(h, "poll_intv", &g_config.poll_intv, 5000);
+    /* Clamp at load time — legacy values may exceed bounds */
+    if (g_config.poll_intv < 200) g_config.poll_intv = 200;
+    if (g_config.poll_intv > 3600000) g_config.poll_intv = 3600000;
 
     /* Custom */
     nvs_load_str(h, "custom1", g_config.custom1, sizeof(g_config.custom1), "");
@@ -216,45 +227,68 @@ void nvs_config_reset(void)
 
 const config_t *nvs_config_get(void)
 {
+    /* Callers read via pointer — must hold lock while reading fields.
+     * The lock is NOT held on return because callers hold the pointer
+     * transiently (single poll cycle). Long-held pointers are the
+     * caller's responsibility. In practice, web writes are rare and
+     * MODBUS reads are fast, so a transient stale read is benign. */
     return &g_config;
+}
+
+/* Internal: lock/unlock helpers for external use by save() */
+void nvs_config_lock(void)
+{
+    if (s_cfg_mutex) xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+}
+
+void nvs_config_unlock(void)
+{
+    if (s_cfg_mutex) xSemaphoreGive(s_cfg_mutex);
 }
 
 /* ================================================================
  * Individual setters (for web POST handler)
  * ================================================================ */
 
+/* Safe strncpy — always null-terminates */
+static void cfg_strncpy(char *dst, const char *src, size_t size)
+{
+    strncpy(dst, src, size - 1);
+    dst[size - 1] = '\0';
+}
+
 esp_err_t nvs_config_set_string(const char *key, const char *value)
 {
     if (!key || !value) return ESP_ERR_INVALID_ARG;
 
     if (strcmp(key, "dev_name") == 0) {
-        strncpy(g_config.dev_name, value, sizeof(g_config.dev_name) - 1);
+        cfg_strncpy(g_config.dev_name, value, sizeof(g_config.dev_name));
     } else if (strcmp(key, "wifi_ssid") == 0) {
-        strncpy(g_config.wifi_ssid, value, sizeof(g_config.wifi_ssid) - 1);
+        cfg_strncpy(g_config.wifi_ssid, value, sizeof(g_config.wifi_ssid));
     } else if (strcmp(key, "wifi_pass") == 0) {
-        strncpy(g_config.wifi_pass, value, sizeof(g_config.wifi_pass) - 1);
+        cfg_strncpy(g_config.wifi_pass, value, sizeof(g_config.wifi_pass));
     } else if (strcmp(key, "mqtt_uri") == 0) {
-        strncpy(g_config.mqtt_uri, value, sizeof(g_config.mqtt_uri) - 1);
+        cfg_strncpy(g_config.mqtt_uri, value, sizeof(g_config.mqtt_uri));
     } else if (strcmp(key, "mqtt_user") == 0) {
-        strncpy(g_config.mqtt_user, value, sizeof(g_config.mqtt_user) - 1);
+        cfg_strncpy(g_config.mqtt_user, value, sizeof(g_config.mqtt_user));
     } else if (strcmp(key, "mqtt_pass") == 0) {
-        strncpy(g_config.mqtt_pass, value, sizeof(g_config.mqtt_pass) - 1);
+        cfg_strncpy(g_config.mqtt_pass, value, sizeof(g_config.mqtt_pass));
     } else if (strcmp(key, "mqtt_client_id") == 0) {
-        strncpy(g_config.mqtt_client_id, value, sizeof(g_config.mqtt_client_id) - 1);
+        cfg_strncpy(g_config.mqtt_client_id, value, sizeof(g_config.mqtt_client_id));
     } else if (strcmp(key, "mqtt_data_t") == 0) {
-        strncpy(g_config.mqtt_data_t, value, sizeof(g_config.mqtt_data_t) - 1);
+        cfg_strncpy(g_config.mqtt_data_t, value, sizeof(g_config.mqtt_data_t));
     } else if (strcmp(key, "mqtt_write_t") == 0) {
-        strncpy(g_config.mqtt_write_t, value, sizeof(g_config.mqtt_write_t) - 1);
+        cfg_strncpy(g_config.mqtt_write_t, value, sizeof(g_config.mqtt_write_t));
     } else if (strcmp(key, "mqtt_stat_t") == 0) {
-        strncpy(g_config.mqtt_stat_t, value, sizeof(g_config.mqtt_stat_t) - 1);
+        cfg_strncpy(g_config.mqtt_stat_t, value, sizeof(g_config.mqtt_stat_t));
     } else if (strcmp(key, "reg_list") == 0) {
-        strncpy(g_config.reg_list, value, sizeof(g_config.reg_list) - 1);
+        cfg_strncpy(g_config.reg_list, value, sizeof(g_config.reg_list));
     } else if (strcmp(key, "custom1") == 0) {
-        strncpy(g_config.custom1, value, sizeof(g_config.custom1) - 1);
+        cfg_strncpy(g_config.custom1, value, sizeof(g_config.custom1));
     } else if (strcmp(key, "custom2") == 0) {
-        strncpy(g_config.custom2, value, sizeof(g_config.custom2) - 1);
+        cfg_strncpy(g_config.custom2, value, sizeof(g_config.custom2));
     } else if (strcmp(key, "custom3") == 0) {
-        strncpy(g_config.custom3, value, sizeof(g_config.custom3) - 1);
+        cfg_strncpy(g_config.custom3, value, sizeof(g_config.custom3));
     } else {
         ESP_LOGD(TAG, "Unknown string config key: %s", key);
         return ESP_ERR_NOT_FOUND;

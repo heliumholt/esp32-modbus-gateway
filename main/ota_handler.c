@@ -9,16 +9,19 @@
 #include "esp_ota_ops.h"
 
 #include "ota_handler.h"
+#include "led_indicator.h"
 
 static const char *TAG = "ota";
 
 #define OTA_QUEUE_DEPTH   1        /* only one OTA at a time */
 #define OTA_TASK_STACK    8192
 #define OTA_TASK_PRIO     2        /* low priority — yield to everything else */
+#define OTA_WATCHDOG_MS   300000   /* 5 min — reset hung OTA flag */
 
 static QueueHandle_t   s_ota_queue   = NULL;
 static ota_status_cb_t s_status_cb   = NULL;
 static volatile bool   s_in_progress = false;
+static TickType_t      s_ota_start_ticks = 0;
 
 /* ================================================================
  * Status helper
@@ -63,6 +66,7 @@ static void ota_task(void *arg)
 
         ESP_LOGI(TAG, "OTA update requested: %s", url);
         ota_status("OTA update starting", false);
+        led_indicator_set(LED_STATE_OTA_PROGRESS);
 
         /* Configure HTTPS OTA (also works for plain HTTP when
          * CONFIG_OTA_ALLOW_HTTP=y) */
@@ -82,6 +86,7 @@ static void ota_task(void *arg)
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "OTA successful! Rebooting in 2 seconds...");
             ota_status("OTA successful, rebooting", false);
+            led_indicator_set(LED_STATE_OTA_SUCCESS);
 
             /* Give MQTT/WiFi a moment to flush before reboot */
             vTaskDelay(pdMS_TO_TICKS(2000));
@@ -159,8 +164,16 @@ esp_err_t ota_request(const char *url)
     }
 
     if (s_in_progress) {
-        ESP_LOGW(TAG, "OTA already in progress, ignoring new request");
-        return ESP_ERR_INVALID_STATE;
+        /* Watchdog: if OTA has been stuck for >5 min, force-reset the flag.
+         * Covers the case where ota_task crashes or hangs during download. */
+        TickType_t elapsed = xTaskGetTickCount() - s_ota_start_ticks;
+        if (elapsed > pdMS_TO_TICKS(OTA_WATCHDOG_MS)) {
+            ESP_LOGW(TAG, "OTA watchdog triggered — resetting hung OTA state");
+            s_in_progress = false;
+        } else {
+            ESP_LOGW(TAG, "OTA already in progress, ignoring new request");
+            return ESP_ERR_INVALID_STATE;
+        }
     }
 
     char buf[OTA_URL_MAX_LEN];
@@ -173,6 +186,7 @@ esp_err_t ota_request(const char *url)
     }
 
     s_in_progress = true;  /* set before returning — prevents TOCTOU race with ota_task */
+    s_ota_start_ticks = xTaskGetTickCount();
     ESP_LOGI(TAG, "OTA request queued");
     return ESP_OK;
 }

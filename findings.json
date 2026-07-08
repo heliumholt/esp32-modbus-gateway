@@ -1,65 +1,60 @@
 [
   {
     "severity": "critical",
-    "file": "main/data_pipeline.c",
-    "line": 139,
-    "summary": "cJSON_Parse() on MQTT payload that may lack null terminator — buffer overread",
-    "failure_scenario": "pipeline_parse_write_json() calls cJSON_Parse(json_str) which requires a null-terminated C string. ESP-MQTT esp_mqtt_event_t.data is NOT guaranteed to be null-terminated (struct has char *data + int data_len because null-termination is not assumed). A non-null-terminated MQTT write-command payload causes cJSON_Parse to overread into adjacent heap memory, producing undefined behavior: crash, heap corruption, or potential RCE from crafted payloads."
+    "file": "main/ota_handler.c",
+    "line": 175,
+    "summary": "s_in_progress set after xQueueSend — if ota_task completes between send and flag write, future OTAs permanently locked out",
+    "failure_scenario": "ota_request() sets s_in_progress = true (line 175) AFTER xQueueSend() succeeds (line 170). The commit pins ota_task to Core 0 (priority 2) while the MQTT task runs at priority 5 on the same core — normally preventing preemption. However, if a priority-6 task (e.g., WiFi MAC) preempts the MQTT task between lines 170-175 and then blocks, the scheduler may run ota_task. If ota_task fully processes the URL (download + flash, potentially ~30s) and resets s_in_progress = false before line 175 executes, the subsequent write sets s_in_progress = true permanently. No URL remains in the queue (ota_task consumed it), so the next ota_request checks s_in_progress, sees true, and rejects. Device becomes deaf to OTA commands until reboot. Fix: move s_in_progress = true to BEFORE xQueueSend, with s_in_progress = false rollback if xQueueSend fails."
   },
   {
     "severity": "critical",
-    "file": "main/app_main.c",
-    "line": 41,
-    "summary": "on_write_received discards len parameter — data length information is lost before JSON parsing",
-    "failure_scenario": "The function receives int len but calls pipeline_parse_write_json(data) without it. The upstream fix requires pipeline_parse_write_json to accept a length parameter or to be replaced with cJSON_ParseWithLength. Contrast with on_ota_received (line 65) which correctly uses cJSON_ParseWithLength(data, len)."
+    "file": "main/web_server.c",
+    "line": 65,
+    "summary": "cJSON_PrintUnformatted return value not checked for NULL before use as string argument",
+    "failure_scenario": "handle_get_config() calls cJSON_PrintUnformatted(root) at line 65 and immediately uses json_str in strlen(json_str) (line 67) and httpd_resp_send(req, json_str, ...) without a NULL check. On ESP32-S3 with PSRAM (CONFIG_SPIRAM_USE_MALLOC=y), heap exhaustion or PSRAM fragmentation can cause cJSON_PrintUnformatted to return NULL. Passing NULL to strlen is undefined behavior — the ESP32 crashes with a data abort exception. The developer was aware of this pattern: data_pipeline.c:pipeline_build_report_json (line 113-117) has the correct NULL guard. Contrast with web_server.c which lacks it. Root cause: the diff changed free(json_str) to cJSON_free(json_str) but missed adding the NULL check the same function needs."
   },
   {
     "severity": "high",
-    "file": "main/uart_config.c",
-    "line": 45,
-    "summary": "ESP_ERROR_CHECK in modbus_uart_init aborts on transient UART failure, defeating caller's retry logic",
-    "failure_scenario": "Three ESP_ERROR_CHECK calls (uart_param_config line 45, uart_set_pin line 48, uart_driver_install line 52) will abort() if UART config fails. However modbus_poll_task (app_main.c:228-233) explicitly checks the return value of modbus_master_init() and implements a retry loop with 5-second delay. The ESP_ERROR_CHECK kills the device before the error can be handled gracefully. A transient UART busy condition causes a full system reset."
+    "file": "main/web_server.c",
+    "line": 100,
+    "summary": "handle_post_save numeric branch silently drops string-field values that parse as integers",
+    "failure_scenario": "The POST handler checks if a form value parses as an integer via strtol (line 101). If so, it calls only the three numeric setters: nvs_config_set_u32 (line 105), nvs_config_set_u16 (line 106), nvs_config_set_u8 (line 107). The string setter (line 109 via else branch) is never called. None of the numeric setters recognize string-field keys like 'dev_name', 'mqtt_uri', 'mqtt_pass', or the new 'mqtt_client_id' — they all return ESP_ERR_NOT_FOUND silently. Impact: Setting mqtt_client_id=123 or dev_name=0 or wifi_ssid=9999 via the web form silently fails. The value is never stored in the RAM cache, and nvs_config_save() writes the stale previous value to NVS. The web form appears to accept the change (it reflects the POST value), but after reboot the old value returns. Fix: check the return value of all three numeric setters; if none matched, fall through to the string setter."
   },
   {
     "severity": "high",
-    "file": "main/ota_handler.c",
-    "line": 21,
-    "summary": "s_in_progress volatile bool has data race between two FreeRTOS tasks on dual-core ESP32-S3",
-    "failure_scenario": "ota_task() writes s_in_progress (lines 62, 112) while ota_request() reads it (line 161) from different task contexts. volatile prevents compiler register-caching but provides no atomicity or memory ordering between cores. Race: ota_request reads false, is preempted, ota_task completes a full OTA cycle, ota_request resumes with stale false and queues a second request to the depth-1 queue, causing either a dropped request or queue corruption."
-  },
-  {
-    "severity": "high",
-    "file": "main/mqtt_client.c",
-    "line": 15,
-    "summary": "s_connected volatile bool accessed from MQTT event handler and publisher task without memory barrier",
-    "failure_scenario": "mqtt_event_handler sets s_connected on the MQTT library task. mqtt_client_publish_data() and mqtt_client_is_connected() read it from the publisher task. On a dual-core system, there is no guarantee that writes by the MQTT task become visible to the publisher task without an explicit memory barrier (e.g., a mutex or atomic store with release semantics). The publisher may read stale values and attempt publish on a disconnected client or skip publish on a connected one."
+    "file": "main/web_server.c",
+    "line": 96,
+    "summary": "No percent-decoding in handle_post_save — URL-encoded characters stored literally in NVS",
+    "failure_scenario": "handle_post_save only replaces '+' with space (line 97) but never decodes percent-encoded sequences (%XX). The browser sends application/x-www-form-urlencoded data where %26 = &, %3D = =, %20 = space, %25 = %. These arrive at the ESP as literal %26/%3D sequences. For example, a client_id of 'foo&bar' is sent as 'foo%26bar', stored as 'foo%26bar', and the MQTT library uses the literal string 'foo%26bar' to connect — failing authentication because the broker expects 'foo&bar'. Affects all string fields including the new mqtt_client_id (which may need special chars depending on broker auth requirements). Fix: add a percent-decode loop after the plus-to-space substitution."
   },
   {
     "severity": "medium",
     "file": "main/nvs_config.c",
-    "line": 229,
-    "summary": "strncpy in nvs_config_set_string without explicit null termination — relies on prior buffer zeroing",
-    "failure_scenario": "All strncpy calls in nvs_config_set_string use sizeof(field)-1 but never explicitly set dst[sizeof(field)-1] = '\\0'. Currently safe because nvs_config_init zeroes the entire g_config struct via memset, but this is fragile: if a future code path writes to a field without the benefit of prior zeroing, or if the struct field size changes, the string may lack null termination. Subsequent strlen/strcmp calls then read past the buffer."
+    "line": 243,
+    "summary": "strncpy without explicit null termination for new mqtt_client_id field — fragile reliance on prior struct zeroing",
+    "failure_scenario": "strncpy(g_config.mqtt_client_id, value, sizeof(g_config.mqtt_client_id) - 1) does not null-terminate when strlen(value) >= sizeof(field) - 1 (i.e., 63 chars). Currently safe because nvs_config_init() memsets the entire g_config to zero before any strncpy call. But this fragile invariant is not enforced: if a future code path calls nvs_config_set_string on a non-zeroed buffer (e.g., a stack copy of config_t, or a reinitialization that skips memset), the mqtt_client_id[63] byte retains its prior value. Subsequent strlen(mqtt_client_id) reads into adjacent memory (mqtt_data_t field), returning an incorrect length. Any MQTT broker interaction with a corrupt client_id may cause authentication failures or connection drops. Fix: add explicit null termination after each strncpy: dst[sizeof(dst) - 1] = '\\0';"
   },
   {
     "severity": "medium",
+    "file": "main/app_main.c",
+    "line": 111,
+    "summary": "factory_reset_task uses signed int hold counter — undefined behavior on wraparound from sustained button press",
+    "failure_scenario": "hold is int32_t, incremented every 100ms when button GPIO 9 is held. After 2,147,483,647 increments (~6.8 years of continuous press), signed overflow triggers C undefined behavior. The compiler may optimize away the while(1) loop, remove the hold % 10 == 0 check (line 122), or eliminate the hold >= RST_HOLD_THRESHOLD comparison (line 116) because a signed value can never exceed a positive threshold once it wraps negative. RST_HOLD_THRESHOLD=50 triggers esp_restart() after 5 seconds in practice, so overflow is never reached in normal use — but the latent UB means the compiler could legally delete the factory-reset logic entirely if it proves hold always wraps. Fix: change int hold to unsigned int or uint32_t.",
+    "note": "Pre-existing bug, not introduced by this diff, but the app_main.c file was substantially restructured (wifi_manager_init moved, chip_info block relocated) making this an adjacent finding"
+  },
+  {
+    "severity": "low",
+    "file": "main/uart_config.c",
+    "line": 56,
+    "summary": "Partial init failure in modbus_uart_init leaks UART driver state — retry loop may become infinite",
+    "failure_scenario": "If uart_param_config and uart_set_pin succeed but uart_driver_install fails (line 56-58), the function returns an error WITHOUT calling uart_driver_delete. s_uart_installed is NOT set (remains false from init). On retry (modbus_poll_task retry loop at app_main.c:233-236 with 5s delay), modbus_uart_deinit is called first by modbus_poll_task (line 232) — but it returns immediately because s_uart_installed is false. The retry then calls modbus_uart_init again: uart_param_config and uart_set_pin succeed again (ESP-IDF allows reconfiguration without deinit), but uart_driver_install returns ESP_ERR_INVALID_STATE because the driver is already installed from the first attempt. The retry loop spins forever: the port number (UART_NUM_1) is permanently held by the previous partial-driver allocation with no way to release it without a cold reboot. Fix: if uart_driver_install fails after a previous successful call (not the first attempt), call uart_driver_delete before returning error."
+  },
+  {
+    "severity": "low",
     "file": "main/web_server.c",
-    "line": 85,
-    "summary": "strtok() used instead of reentrant strtok_r() — not thread-safe under concurrent HTTP requests",
-    "failure_scenario": "handle_post_save() uses strtok(buf, \"&\") which maintains internal static state. If the HTTP server processes concurrent requests (possible with ESP-IDF's esp_http_server), a strtok call in one handler corrupts the parse state of another. This produces malformed key=value extraction, potentially writing incorrect configuration values to NVS or silently dropping fields."
-  },
-  {
-    "severity": "medium",
-    "file": "main/app_main.c",
-    "line": 108,
-    "summary": "signed int hold can overflow after sustained button press — undefined behavior",
-    "failure_scenario": "hold is 32-bit signed int. Incremented every 100ms while button is held. After 2,147,483,647 ticks (~6.8 years of continuous press), signed overflow is undefined behavior per the C standard. The compiler may optimize away the entire loop, remove the modulo check (hold % 10 == 0, line 119), or produce incorrect comparison results. Fix: use unsigned int or check overflow explicitly. In practice the RST_HOLD_THRESHOLD=50 triggers esp_restart() after 5 seconds, but the latent UB remains."
-  },
-  {
-    "severity": "medium",
-    "file": "main/app_main.c",
-    "line": 252,
-    "summary": "pdMS_TO_TICKS with uint32_t poll_intv has no upper bound clamp — MODBUS polling can be silently disabled",
-    "failure_scenario": "cfg->poll_intv is uint32_t (max ~4.29e9 ms). The lower clamp (poll_intv < 200 ? 200 : poll_intv) prevents short delays but caps nothing at the high end. The web POST handler (strtol) accepts values up to LONG_MAX (~2.15e9 ms, ~24 days) without validation. Setting poll_intv to a very large value via the web form produces a period of up to ~24 days between MODBUS polls, effectively disabling the device's primary function with no error indication. Add an upper validation bound (e.g., 60000 ms = 1 minute)."
+    "line": 83,
+    "summary": "saveptr declared uninitialized on first strtok_r call — works by POSIX spec but relies on implementation behavior",
+    "failure_scenario": "char *saveptr is stack-declared without initialization (line 86) before the first strtok_r(buf, \"&\", &saveptr) call (line 87). On the first call, POSIX strtok_r passes buf to strtok internals and uses saveptr as an output parameter — it does not read the initial value. However, if a non-conforming libc implementation or a compiler sanitizer instruments saveptr as 'uninitialized', this could produce a runtime trap or false-positive diagnostic. Code audit tools (e.g., GCC -Wmaybe-uninitialized with LTO enabled on ESP-IDF) may flag this as a warning. Fix: initialize saveptr = NULL; on declaration.",
+    "note": "Low severity — functionally correct with all POSIX and BSD strtok_r implementations, but triggers static-analysis warnings"
   }
 ]
