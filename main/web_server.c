@@ -212,12 +212,15 @@ static esp_err_t handle_post_save(httpd_req_t *req)
     nvs_config_save();
     nvs_config_unlock();
 
-    /* Signal WiFi manager to switch modes */
-    wifi_manager_on_config_saved();
-
-    /* Respond success */
+    /* Respond success BEFORE mode switch — web_server_stop() kills the server */
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+
+    /* Brief delay to let TCP flush the response before WiFi tears down */
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* Signal WiFi manager to switch modes */
+    wifi_manager_on_config_saved();
     return ESP_OK;
 }
 
