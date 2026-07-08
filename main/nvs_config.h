@@ -19,6 +19,7 @@ extern "C" {
 #define CONFIG_STR_LEN_MQTT_URI   128
 #define CONFIG_STR_LEN_MQTT_USER   32
 #define CONFIG_STR_LEN_MQTT_PASS   32
+#define CONFIG_STR_LEN_MQTT_CID    64
 #define CONFIG_STR_LEN_TOPIC       64
 #define CONFIG_STR_LEN_REG_LIST  1024
 #define CONFIG_STR_LEN_CUSTOM     128
@@ -40,6 +41,7 @@ typedef struct {
     uint16_t mqtt_port;
     char     mqtt_user[CONFIG_STR_LEN_MQTT_USER];
     char     mqtt_pass[CONFIG_STR_LEN_MQTT_PASS];
+    char     mqtt_client_id[CONFIG_STR_LEN_MQTT_CID];
 
     /* MQTT topics (with {dev} placeholder) */
     char     mqtt_data_t[CONFIG_STR_LEN_TOPIC];

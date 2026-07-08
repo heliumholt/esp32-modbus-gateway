@@ -14,6 +14,8 @@ static const char *TAG = "uart";
 #define UART_TX_BUF_SIZE     (256)
 #define UART_RX_BUF_SIZE     (512)
 
+static bool s_uart_installed = false;
+
 /* ================================================================
  * Public
  * ================================================================ */
@@ -42,16 +44,18 @@ esp_err_t modbus_uart_init(void)
              uart_cfg.baud_rate, uart_cfg.data_bits, uart_cfg.stop_bits,
              uart_cfg.parity, cfg->tx_pin, cfg->rx_pin, cfg->de_pin);
 
-    ESP_ERROR_CHECK(uart_param_config(MODBUS_UART_NUM, &uart_cfg));
+    esp_err_t err;
 
-    /* Leave 30ms for RS485 and UART — matching MODBUS standard timing */
-    ESP_ERROR_CHECK(uart_set_pin(MODBUS_UART_NUM,
-                                 cfg->tx_pin, cfg->rx_pin,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    err = uart_param_config(MODBUS_UART_NUM, &uart_cfg);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "uart_param_config failed: 0x%x", err); return err; }
 
-    ESP_ERROR_CHECK(uart_driver_install(MODBUS_UART_NUM,
-                                        UART_RX_BUF_SIZE, UART_TX_BUF_SIZE,
-                                        0, NULL, 0));
+    err = uart_set_pin(MODBUS_UART_NUM, cfg->tx_pin, cfg->rx_pin,
+                       UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "uart_set_pin failed: 0x%x", err); return err; }
+
+    err = uart_driver_install(MODBUS_UART_NUM, UART_RX_BUF_SIZE, UART_TX_BUF_SIZE,
+                              0, NULL, 0);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "uart_driver_install failed: 0x%x", err); return err; }
 
     /* Initialize DE/RE pin as GPIO if configured */
     if (cfg->de_pin != 0xFF && cfg->de_pin < GPIO_NUM_MAX) {
@@ -70,17 +74,21 @@ esp_err_t modbus_uart_init(void)
     uart_flush(MODBUS_UART_NUM);
 
     ESP_LOGI(TAG, "UART1 initialized");
+    s_uart_installed = true;
     return ESP_OK;
 }
 
 esp_err_t modbus_uart_deinit(void)
 {
+    if (!s_uart_installed) return ESP_OK;
+
     const config_t *cfg = nvs_config_get();
     if (cfg->de_pin != 0xFF && cfg->de_pin < GPIO_NUM_MAX) {
         gpio_set_level(cfg->de_pin, 0);
     }
     uart_flush(MODBUS_UART_NUM);
     uart_driver_delete(MODBUS_UART_NUM);
+    s_uart_installed = false;
     ESP_LOGI(TAG, "UART1 deinitialized");
     return ESP_OK;
 }

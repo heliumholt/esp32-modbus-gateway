@@ -1,0 +1,65 @@
+[
+  {
+    "severity": "critical",
+    "file": "main/data_pipeline.c",
+    "line": 139,
+    "summary": "cJSON_Parse() on MQTT payload that may lack null terminator — buffer overread",
+    "failure_scenario": "pipeline_parse_write_json() calls cJSON_Parse(json_str) which requires a null-terminated C string. ESP-MQTT esp_mqtt_event_t.data is NOT guaranteed to be null-terminated (struct has char *data + int data_len because null-termination is not assumed). A non-null-terminated MQTT write-command payload causes cJSON_Parse to overread into adjacent heap memory, producing undefined behavior: crash, heap corruption, or potential RCE from crafted payloads."
+  },
+  {
+    "severity": "critical",
+    "file": "main/app_main.c",
+    "line": 41,
+    "summary": "on_write_received discards len parameter — data length information is lost before JSON parsing",
+    "failure_scenario": "The function receives int len but calls pipeline_parse_write_json(data) without it. The upstream fix requires pipeline_parse_write_json to accept a length parameter or to be replaced with cJSON_ParseWithLength. Contrast with on_ota_received (line 65) which correctly uses cJSON_ParseWithLength(data, len)."
+  },
+  {
+    "severity": "high",
+    "file": "main/uart_config.c",
+    "line": 45,
+    "summary": "ESP_ERROR_CHECK in modbus_uart_init aborts on transient UART failure, defeating caller's retry logic",
+    "failure_scenario": "Three ESP_ERROR_CHECK calls (uart_param_config line 45, uart_set_pin line 48, uart_driver_install line 52) will abort() if UART config fails. However modbus_poll_task (app_main.c:228-233) explicitly checks the return value of modbus_master_init() and implements a retry loop with 5-second delay. The ESP_ERROR_CHECK kills the device before the error can be handled gracefully. A transient UART busy condition causes a full system reset."
+  },
+  {
+    "severity": "high",
+    "file": "main/ota_handler.c",
+    "line": 21,
+    "summary": "s_in_progress volatile bool has data race between two FreeRTOS tasks on dual-core ESP32-S3",
+    "failure_scenario": "ota_task() writes s_in_progress (lines 62, 112) while ota_request() reads it (line 161) from different task contexts. volatile prevents compiler register-caching but provides no atomicity or memory ordering between cores. Race: ota_request reads false, is preempted, ota_task completes a full OTA cycle, ota_request resumes with stale false and queues a second request to the depth-1 queue, causing either a dropped request or queue corruption."
+  },
+  {
+    "severity": "high",
+    "file": "main/mqtt_client.c",
+    "line": 15,
+    "summary": "s_connected volatile bool accessed from MQTT event handler and publisher task without memory barrier",
+    "failure_scenario": "mqtt_event_handler sets s_connected on the MQTT library task. mqtt_client_publish_data() and mqtt_client_is_connected() read it from the publisher task. On a dual-core system, there is no guarantee that writes by the MQTT task become visible to the publisher task without an explicit memory barrier (e.g., a mutex or atomic store with release semantics). The publisher may read stale values and attempt publish on a disconnected client or skip publish on a connected one."
+  },
+  {
+    "severity": "medium",
+    "file": "main/nvs_config.c",
+    "line": 229,
+    "summary": "strncpy in nvs_config_set_string without explicit null termination — relies on prior buffer zeroing",
+    "failure_scenario": "All strncpy calls in nvs_config_set_string use sizeof(field)-1 but never explicitly set dst[sizeof(field)-1] = '\\0'. Currently safe because nvs_config_init zeroes the entire g_config struct via memset, but this is fragile: if a future code path writes to a field without the benefit of prior zeroing, or if the struct field size changes, the string may lack null termination. Subsequent strlen/strcmp calls then read past the buffer."
+  },
+  {
+    "severity": "medium",
+    "file": "main/web_server.c",
+    "line": 85,
+    "summary": "strtok() used instead of reentrant strtok_r() — not thread-safe under concurrent HTTP requests",
+    "failure_scenario": "handle_post_save() uses strtok(buf, \"&\") which maintains internal static state. If the HTTP server processes concurrent requests (possible with ESP-IDF's esp_http_server), a strtok call in one handler corrupts the parse state of another. This produces malformed key=value extraction, potentially writing incorrect configuration values to NVS or silently dropping fields."
+  },
+  {
+    "severity": "medium",
+    "file": "main/app_main.c",
+    "line": 108,
+    "summary": "signed int hold can overflow after sustained button press — undefined behavior",
+    "failure_scenario": "hold is 32-bit signed int. Incremented every 100ms while button is held. After 2,147,483,647 ticks (~6.8 years of continuous press), signed overflow is undefined behavior per the C standard. The compiler may optimize away the entire loop, remove the modulo check (hold % 10 == 0, line 119), or produce incorrect comparison results. Fix: use unsigned int or check overflow explicitly. In practice the RST_HOLD_THRESHOLD=50 triggers esp_restart() after 5 seconds, but the latent UB remains."
+  },
+  {
+    "severity": "medium",
+    "file": "main/app_main.c",
+    "line": 252,
+    "summary": "pdMS_TO_TICKS with uint32_t poll_intv has no upper bound clamp — MODBUS polling can be silently disabled",
+    "failure_scenario": "cfg->poll_intv is uint32_t (max ~4.29e9 ms). The lower clamp (poll_intv < 200 ? 200 : poll_intv) prevents short delays but caps nothing at the high end. The web POST handler (strtol) accepts values up to LONG_MAX (~2.15e9 ms, ~24 days) without validation. Setting poll_intv to a very large value via the web form produces a period of up to ~24 days between MODBUS polls, effectively disabling the device's primary function with no error indication. Add an upper validation bound (e.g., 60000 ms = 1 minute)."
+  }
+]

@@ -59,7 +59,7 @@ static void ota_task(void *arg)
             continue;  /* should never happen */
         }
 
-        s_in_progress = true;
+        /* s_in_progress is already set by ota_request() */
 
         ESP_LOGI(TAG, "OTA update requested: %s", url);
         ota_status("OTA update starting", false);
@@ -132,8 +132,8 @@ esp_err_t ota_handler_init(ota_status_cb_t on_status)
         return ESP_ERR_NO_MEM;
     }
 
-    BaseType_t ret = xTaskCreate(ota_task, "ota", OTA_TASK_STACK,
-                                 NULL, OTA_TASK_PRIO, NULL);
+    BaseType_t ret = xTaskCreatePinnedToCore(ota_task, "ota", OTA_TASK_STACK,
+                                              NULL, OTA_TASK_PRIO, NULL, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create OTA task");
         vQueueDelete(s_ota_queue);
@@ -172,6 +172,7 @@ esp_err_t ota_request(const char *url)
         return ESP_ERR_NO_MEM;
     }
 
+    s_in_progress = true;  /* set before returning — prevents TOCTOU race with ota_task */
     ESP_LOGI(TAG, "OTA request queued");
     return ESP_OK;
 }

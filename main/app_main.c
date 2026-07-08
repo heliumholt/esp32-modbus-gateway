@@ -40,7 +40,7 @@ static TaskHandle_t s_pub_task = NULL;
  */
 static void on_write_received(const char *topic, const char *data, int len)
 {
-    pipeline_parse_write_json(data);
+    pipeline_parse_write_json(data, len);
 }
 
 /* ================================================================
@@ -71,7 +71,10 @@ static void on_ota_received(const char *topic, const char *data, int len)
     cJSON *url_item = cJSON_GetObjectItem(root, "url");
     if (cJSON_IsString(url_item) && url_item->valuestring) {
         ESP_LOGI(TAG, "OTA request received: %s", url_item->valuestring);
-        ota_request(url_item->valuestring);
+        esp_err_t ret = ota_request(url_item->valuestring);
+        if (ret != ESP_OK) {
+            mqtt_client_publish_status("OTA request rejected", 20);
+        }
     } else {
         ESP_LOGW(TAG, "OTA: missing or invalid 'url' field");
     }
@@ -83,7 +86,7 @@ static void on_ota_received(const char *topic, const char *data, int len)
  * Factory Reset Button Monitor Task
  *
  * Hardwired to GPIO 9 (active-low, internal pull-up).
- * A continuous 3-second LOW (button held) triggers nvs_config_reset().
+ * A continuous 5-second LOW (button held) triggers nvs_config_reset().
  * ================================================================ */
 
 #define RST_BUTTON_GPIO     9
@@ -336,20 +339,7 @@ void app_main(void)
     /* ------ 5. Initialize OTA handler ------ */
     ESP_ERROR_CHECK(ota_handler_init(ota_status_callback));
 
-    /* ------ 6. Factory-reset button monitor ------ */
-    xTaskCreatePinnedToCore(factory_reset_task, "rst_btn", 2048, NULL, 1,
-                            NULL, 0);
-
-    /* ------ 7. Create main tasks ------ */
-    /* MODBUS poll task — pinned to Core 1 for real-time UART timing */
-    xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
-                            &s_modbus_task, 1);
-
-    /* MQTT publisher task — Core 0 (shares with WiFi + web server) */
-    xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 5120, NULL, 4,
-                            &s_pub_task, 0);
-
-    /* ------ 8. Log chip info ------ */
+    /* ------ 6. Log chip info ------ */
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     uint32_t flash_size = 0;
@@ -358,9 +348,21 @@ void app_main(void)
              chip_info.cores, chip_info.revision,
              flash_size / (1024 * 1024));
 
-    /* ------ 9. Start WiFi state machine (may block during STA connect) ------ */
-    /* This is the last init step — all tasks are already running and waiting. */
+    /* ------ 7. Start WiFi state machine FIRST — creates event group that tasks depend on ------ */
     wifi_manager_init();
+
+    /* ------ 8. Factory-reset button monitor ------ */
+    xTaskCreatePinnedToCore(factory_reset_task, "rst_btn", 2048, NULL, 1,
+                            NULL, 0);
+
+    /* ------ 9. Create main tasks ------ */
+    /* MODBUS poll task — pinned to Core 1 for real-time UART timing */
+    xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
+                            &s_modbus_task, 1);
+
+    /* MQTT publisher task — Core 0 (shares with WiFi + web server) */
+    xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 5120, NULL, 4,
+                            &s_pub_task, 0);
 
     /* app_main returns — FreeRTOS scheduler keeps tasks running */
     ESP_LOGI(TAG, "Init complete. System running.");

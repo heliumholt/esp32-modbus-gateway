@@ -136,11 +136,11 @@ int pipeline_build_report_json(char *json_out, int max_len, int timeout_ms)
  * Parse write JSON
  * ================================================================ */
 
-int pipeline_parse_write_json(const char *json_str)
+int pipeline_parse_write_json(const char *json_str, int len)
 {
-    if (!json_str) return -1;
+    if (!json_str || len <= 0) return -1;
 
-    cJSON *root = cJSON_Parse(json_str);
+    cJSON *root = cJSON_ParseWithLength(json_str, len);
     if (!root) {
         ESP_LOGW(TAG, "Failed to parse write JSON: %s",
                  cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "unknown");

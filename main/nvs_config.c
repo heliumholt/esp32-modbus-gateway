@@ -110,6 +110,7 @@ bool nvs_config_init(void)
     nvs_load_u16(h, "mqtt_port", &g_config.mqtt_port, 1883);
     nvs_load_str(h, "mqtt_user", g_config.mqtt_user, sizeof(g_config.mqtt_user), "");
     nvs_load_str(h, "mqtt_pass", g_config.mqtt_pass, sizeof(g_config.mqtt_pass), "");
+    nvs_load_str(h, "mqtt_cid",  g_config.mqtt_client_id, sizeof(g_config.mqtt_client_id), "");
     nvs_load_str(h, "mq_data_t", g_config.mqtt_data_t,  sizeof(g_config.mqtt_data_t),  g_config.mqtt_data_t);
     nvs_load_str(h, "mq_writ_t", g_config.mqtt_write_t, sizeof(g_config.mqtt_write_t), g_config.mqtt_write_t);
     nvs_load_str(h, "mq_stat_t", g_config.mqtt_stat_t,  sizeof(g_config.mqtt_stat_t),  g_config.mqtt_stat_t);
@@ -166,6 +167,7 @@ esp_err_t nvs_config_save(void)
     nvs_set_u16(h, "mqtt_port",  g_config.mqtt_port);
     nvs_set_str(h, "mqtt_user",  g_config.mqtt_user);
     nvs_set_str(h, "mqtt_pass",  g_config.mqtt_pass);
+    nvs_set_str(h, "mqtt_cid",   g_config.mqtt_client_id);
     nvs_set_str(h, "mq_data_t",  g_config.mqtt_data_t);
     nvs_set_str(h, "mq_writ_t",  g_config.mqtt_write_t);
     nvs_set_str(h, "mq_stat_t",  g_config.mqtt_stat_t);
@@ -237,6 +239,8 @@ esp_err_t nvs_config_set_string(const char *key, const char *value)
         strncpy(g_config.mqtt_user, value, sizeof(g_config.mqtt_user) - 1);
     } else if (strcmp(key, "mqtt_pass") == 0) {
         strncpy(g_config.mqtt_pass, value, sizeof(g_config.mqtt_pass) - 1);
+    } else if (strcmp(key, "mqtt_client_id") == 0) {
+        strncpy(g_config.mqtt_client_id, value, sizeof(g_config.mqtt_client_id) - 1);
     } else if (strcmp(key, "mqtt_data_t") == 0) {
         strncpy(g_config.mqtt_data_t, value, sizeof(g_config.mqtt_data_t) - 1);
     } else if (strcmp(key, "mqtt_write_t") == 0) {
@@ -303,7 +307,8 @@ esp_err_t nvs_config_set_u32(const char *key, uint32_t value)
     if (strcmp(key, "baudrate") == 0) {
         g_config.baudrate = value;
     } else if (strcmp(key, "poll_intv") == 0) {
-        g_config.poll_intv = value;
+        g_config.poll_intv = (value < 200) ? 200 :
+                             (value > 3600000) ? 3600000 : value;
     } else {
         ESP_LOGD(TAG, "Unknown u32 config key: %s", key);
         return ESP_ERR_NOT_FOUND;

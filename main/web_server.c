@@ -45,6 +45,7 @@ static esp_err_t handle_get_config(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "mqtt_port",  cfg->mqtt_port);
     cJSON_AddStringToObject(root, "mqtt_user",  cfg->mqtt_user);
     cJSON_AddStringToObject(root, "mqtt_pass",  "****");
+    cJSON_AddStringToObject(root, "mqtt_client_id", cfg->mqtt_client_id);
     cJSON_AddStringToObject(root, "mqtt_data_t", cfg->mqtt_data_t);
     cJSON_AddStringToObject(root, "mqtt_write_t", cfg->mqtt_write_t);
     cJSON_AddStringToObject(root, "mqtt_stat_t", cfg->mqtt_stat_t);
@@ -64,7 +65,7 @@ static esp_err_t handle_get_config(httpd_req_t *req)
     char *json_str = cJSON_PrintUnformatted(root);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_str, strlen(json_str));
-    free(json_str);
+    cJSON_free(json_str);
     cJSON_Delete(root);
     return ESP_OK;
 }
@@ -82,7 +83,8 @@ static esp_err_t handle_post_save(httpd_req_t *req)
     ESP_LOGI(TAG, "POST /save body: %s", buf);
 
     /* Parse URL-encoded form data: key1=val1&key2=val2... */
-    char *pair = strtok(buf, "&");
+    char *saveptr;
+    char *pair = strtok_r(buf, "&", &saveptr);
     while (pair) {
         char *eq = strchr(pair, '=');
         if (eq) {
@@ -107,7 +109,7 @@ static esp_err_t handle_post_save(httpd_req_t *req)
                 nvs_config_set_string(key, val);
             }
         }
-        pair = strtok(NULL, "&");
+        pair = strtok_r(NULL, "&", &saveptr);
     }
 
     /* Persist to NVS */

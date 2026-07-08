@@ -20,6 +20,10 @@ static char s_topic_write[64];
 static char s_topic_status[64];
 static char s_topic_ota[64];
 
+/* Cached topic lengths — set once after resolve_topic() */
+static size_t s_topic_write_len;
+static size_t s_topic_ota_len;
+
 /* OTA topic template — can be overridden via Kconfig */
 #define OTA_TOPIC_TEMPLATE  "{dev}/ota"
 
@@ -86,16 +90,16 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                      ev->data_len, ev->data);
 
             /* Check if this is a write command */
-            if (strncmp(ev->topic, s_topic_write, ev->topic_len) == 0 &&
-                (size_t)ev->topic_len == strlen(s_topic_write)) {
+            if ((size_t)ev->topic_len == s_topic_write_len &&
+                memcmp(ev->topic, s_topic_write, s_topic_write_len) == 0) {
                 if (s_data_cb) {
                     s_data_cb(ev->topic, ev->data, ev->data_len);
                 }
             }
 
             /* Check if this is an OTA command */
-            if (strncmp(ev->topic, s_topic_ota, ev->topic_len) == 0 &&
-                (size_t)ev->topic_len == strlen(s_topic_ota)) {
+            if ((size_t)ev->topic_len == s_topic_ota_len &&
+                memcmp(ev->topic, s_topic_ota, s_topic_ota_len) == 0) {
                 if (s_ota_cb) {
                     s_ota_cb(ev->topic, ev->data, ev->data_len);
                 }
@@ -134,6 +138,10 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
     s_data_cb = on_data;
     s_ota_cb  = on_ota;
 
+    /* Cache topic lengths for fast dispatch */
+    s_topic_write_len = strlen(s_topic_write);
+    s_topic_ota_len  = strlen(s_topic_ota);
+
     /* Build broker URI */
     char uri[256];
     snprintf(uri, sizeof(uri), "%s:%d", cfg->mqtt_uri, cfg->mqtt_port);
@@ -142,6 +150,7 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
         .broker.address.uri = uri,
         .credentials.username = (strlen(cfg->mqtt_user) > 0) ? cfg->mqtt_user : NULL,
         .credentials.authentication.password = (strlen(cfg->mqtt_pass) > 0) ? cfg->mqtt_pass : NULL,
+        .credentials.client_id = (strlen(cfg->mqtt_client_id) > 0) ? cfg->mqtt_client_id : NULL,
         .session.keepalive = 60,
         .session.disable_clean_session = false,
         .network.disable_auto_reconnect = false,

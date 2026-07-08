@@ -129,7 +129,7 @@ static void start_ap_mode(void)
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf((char *)wifi_config.ap.ssid, sizeof(wifi_config.ap.ssid),
-             "MODBUS_%02X%02X", mac[4], mac[5]);
+             "BOX_%02X%02X", mac[4], mac[5]);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));

@@ -61,9 +61,10 @@ int pipeline_build_report_json(char *json_out, int max_len, int timeout_ms);
  * Called by MQTT event handler.
  *
  * @param json_str  Raw JSON string from MQTT message
+ * @param len       Length of json_str (may not be null-terminated)
  * @return Number of write commands parsed and queued, or -1 on error
  */
-int pipeline_parse_write_json(const char *json_str);
+int pipeline_parse_write_json(const char *json_str, int len);
 
 /**
  * Dequeue a pending write command (non-blocking).

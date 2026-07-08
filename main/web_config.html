@@ -59,6 +59,8 @@ STA 失败时回退到 AP 模式
 <input name="mqtt_user" maxlength="31" placeholder="留空则匿名">
 <label>密码 (可选)</label>
 <input name="mqtt_pass" type="password" maxlength="31" placeholder="留空则匿名">
+<label>客户端 ID (可选)</label>
+<input name="mqtt_client_id" maxlength="63" placeholder="留空则自动生成">
 <div class="row" style="margin-top:6px">
 <div><label>数据上报主题</label><input name="mqtt_data_t" maxlength="63" value="{dev}/data"></div>
 <div><label>反写命令主题</label><input name="mqtt_write_t" maxlength="63" value="{dev}/write"></div>
