@@ -243,6 +243,8 @@ void web_server_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 16;
+    config.max_open_sockets = 3;     /* keep low — MQTT + WiFi need sockets too */
+    config.backlog_conn = 2;
     config.lru_purge_enable = true;
     config.stack_size = 8192;
 
