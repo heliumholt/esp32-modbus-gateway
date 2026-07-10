@@ -1,54 +1,9 @@
 idf_component_register(
-    SRCS
-        "app_main.c"
-        "nvs_config.c"
-        "wifi_manager.c"
-        "web_server.c"
-        "dns_responder.c"
-        "uart_config.c"
-        "modbus_master.c"
-        "modbus_params.c"
-        "mqtt_client.c"
-        "data_pipeline.c"
-        "ota_handler.c"
-        "led_indicator.c"
-    INCLUDE_DIRS
-        "."
-    EMBED_FILES
-        "web_config.html"
-    REQUIRES
-        nvs_flash
-        esp_wifi
-        esp_netif
-        esp_http_server
-        esp_event
-        mqtt
-        cjson
-        driver
-        esp_driver_uart
-        esp_driver_gpio
-        esp_driver_rmt
-        lwip
-        spi_flash
-        esp_https_ota
-        app_update
-        bootloader_support
-        esp_timer
+    SRCS "app_main.c"
+    INCLUDE_DIRS "."
+    REQUIRES config network modbus mqtt_app ota led
+             nvs_flash esp_event esp_netif esp_timer
+             spi_flash cjson esp_driver_gpio
 )
 
-# Set compile options for smaller binary
-set_source_files_properties(
-    app_main.c
-    nvs_config.c
-    wifi_manager.c
-    web_server.c
-    dns_responder.c
-    uart_config.c
-    modbus_master.c
-    modbus_params.c
-    mqtt_client.c
-    data_pipeline.c
-    ota_handler.c
-    led_indicator.c
-    PROPERTIES COMPILE_OPTIONS "-Os"
-)
+set_source_files_properties(app_main.c PROPERTIES COMPILE_OPTIONS "-Os")

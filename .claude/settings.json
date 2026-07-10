@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd c:\\\\Users\\\\Hao\\\\CODE\\\\cc; $env:IDF_PATH = \"C:\\\\esp\\\\v6.0.2\\\\esp-idf\"; $env:IDF_TOOLS_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\"; & \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\\\\Scripts\\\\python.exe\" \"$env:IDF_PATH\\\\tools\\\\idf.py\" fullclean 2>&1 | Select-Object -Last 5)",
+      "PowerShell(cd c:\\\\Users\\\\Hao\\\\CODE\\\\cc; $env:IDF_PATH = \"C:\\\\esp\\\\v6.0.2\\\\esp-idf\"; $env:IDF_TOOLS_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\"; $env:ESP_IDF_VERSION = \"6.0.2\"; & \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\\\\Scripts\\\\python.exe\" \"$env:IDF_PATH\\\\tools\\\\idf.py\" fullclean 2>&1 | Select-Object -Last 5)",
+      "PowerShell(cd c:\\\\Users\\\\Hao\\\\CODE\\\\cc; $env:IDF_PATH = \"C:\\\\esp\\\\v6.0.2\\\\esp-idf\"; $env:IDF_TOOLS_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\"; $env:ESP_IDF_VERSION = \"6.0.2\"; $env:IDF_PYTHON_ENV_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\"; & \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\\\\Scripts\\\\python.exe\" \"$env:IDF_PATH\\\\tools\\\\idf.py\" build 2>&1 | Select-Object -Last 30)",
+      "Read(//c/Users/Hao/.espressif/tools/**)",
+      "Bash(find /c/Users/Hao/.espressif/tools -name \"cmake*\" -maxdepth 4 2>/dev/null | head -10)",
+      "Read(//c/Users/Hao/.espressif/tools//**)",
+      "Bash(where cmake *)",
+      "Read(//c/Program Files/CMake/bin/**)",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/CMake/bin/**)",
+      "Bash(find /c -name \"cmake.exe\" -maxdepth 5)",
+      "PowerShell(Get-Command cmake -ErrorAction SilentlyContinue)",
+      "Read(//c/esp/**)",
+      "PowerShell(cd c:\\\\Users\\\\Hao\\\\CODE\\\\cc; $env:IDF_PATH = \"C:\\\\esp\\\\v6.0.2\\\\esp-idf\"; $env:IDF_TOOLS_PATH = \"C:\\\\Espressif\"; $env:ESP_IDF_VERSION = \"6.0.2\"; $env:IDF_PYTHON_ENV_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\"; & \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\\\\Scripts\\\\python.exe\" \"$env:IDF_PATH\\\\tools\\\\idf.py\" build 2>&1 | Select-String -Pattern \"error|Error|undefined|fatal\" -Context 0,2 | Select-Object -First 30 | ForEach-Object { $_.Line })",
+      "PowerShell(cd c:\\\\Users\\\\Hao\\\\CODE\\\\cc; $env:IDF_PATH = \"C:\\\\esp\\\\v6.0.2\\\\esp-idf\"; $env:IDF_TOOLS_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\"; $env:ESP_IDF_VERSION = \"6.0.2\"; $env:IDF_PYTHON_ENV_PATH = \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\"; $env:PATH = \"C:\\\\Espressif\\\\tools\\\\cmake\\\\4.0.3\\\\bin;C:\\\\Espressif\\\\tools\\\\ninja\\\\1.12.1;C:\\\\Espressif\\\\tools\\\\xtensa-esp-elf\\\\esp-15.2.0_20251204\\\\xtensa-esp-elf\\\\bin;\" + $env:PATH; & \"C:\\\\Users\\\\Hao\\\\.espressif\\\\python_env\\\\idf6.0_py3.14_env\\\\Scripts\\\\python.exe\" \"$env:IDF_PATH\\\\tools\\\\idf.py\" build 2>&1 | Select-Object -Last 40)"
+    ]
+  }
+}
