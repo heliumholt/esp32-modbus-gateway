@@ -22,6 +22,7 @@ static EventGroupHandle_t s_wifi_events;
 static wifi_state_t s_state = WIFI_STATE_AP_MODE;
 static int s_sta_retry_count = 0;
 static TimerHandle_t s_mode_switch_timer = NULL;
+static TimerHandle_t s_reconnect_timer = NULL;
 
 /* Forward declarations */
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -30,7 +31,9 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
                              int32_t event_id, void *event_data);
 static void start_ap_mode(void);
 static void start_sta_mode(void);
-static void mode_switch_timer_cb(TimerHandle_t timer);
+static void mode_switch_phase1_cb(TimerHandle_t timer);
+static void mode_switch_phase2_cb(TimerHandle_t timer);
+static void reconnect_timer_cb(TimerHandle_t timer);
 
 /* ================================================================
  * Public
@@ -43,6 +46,10 @@ void wifi_manager_init(void)
         ESP_LOGE(TAG, "Failed to create WiFi event group");
         return;
     }
+
+    /* Create reconnect timer (one-shot) */
+    s_reconnect_timer = xTimerCreate("reconnect", pdMS_TO_TICKS(1000),
+                                      pdFALSE, NULL, reconnect_timer_cb);
 
     /* Register event handlers */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -72,11 +79,10 @@ void wifi_manager_on_config_saved(void)
     ESP_LOGI(TAG, "Config saved, transitioning to STA mode");
     xEventGroupSetBits(s_wifi_events, WIFI_EVENT_CONFIG_SAVED);
 
-    /* Defer the actual mode switch — HTTP response already sent.
-     * 300ms timer lets TCP flush before we tear down WiFi. */
+    /* Phase 1: stop web server + WiFi, then schedule phase 2 after 300ms */
     if (!s_mode_switch_timer) {
-        s_mode_switch_timer = xTimerCreate("mode_sw", pdMS_TO_TICKS(300),
-                                            pdFALSE, NULL, mode_switch_timer_cb);
+        s_mode_switch_timer = xTimerCreate("mode_sw1", pdMS_TO_TICKS(300),
+                                            pdFALSE, NULL, mode_switch_phase1_cb);
     }
     if (s_mode_switch_timer) {
         xTimerStart(s_mode_switch_timer, 0);
@@ -180,24 +186,61 @@ static void start_sta_mode(void)
     ESP_LOGI(TAG, "STA connecting to SSID: %s", config->wifi_ssid);
 
     esp_wifi_connect();
-    /* Non-blocking — event handlers manage retry + fallback */
-}
-
-/* Timer callback: deferred mode switch (300ms after HTTP response) */
-static void mode_switch_timer_cb(TimerHandle_t timer)
-{
-    (void)timer;
-    ESP_LOGI(TAG, "Mode switch timer fired — switching to STA");
-    web_server_stop();
-    esp_wifi_stop();
-    esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(500));
-    start_sta_mode();
 }
 
 /* ================================================================
- * Event handlers
+ * Timer callbacks (non-blocking — no vTaskDelay)
  * ================================================================ */
+
+/* Phase 1: Stop web server + WiFi, schedule phase 2 */
+static void mode_switch_phase1_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    ESP_LOGI(TAG, "Mode switch phase 1: stopping web server + WiFi");
+    web_server_stop();
+    esp_wifi_stop();
+
+    /* Schedule phase 2 after 500ms settling time */
+    static TimerHandle_t s_phase2_timer = NULL;
+    if (!s_phase2_timer) {
+        s_phase2_timer = xTimerCreate("mode_sw2", pdMS_TO_TICKS(500),
+                                       pdFALSE, NULL, mode_switch_phase2_cb);
+    }
+    if (s_phase2_timer) {
+        xTimerStart(s_phase2_timer, 0);
+    }
+}
+
+/* Phase 2: Start STA mode */
+static void mode_switch_phase2_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    ESP_LOGI(TAG, "Mode switch phase 2: starting STA");
+    start_sta_mode();
+}
+
+/* Reconnect timer: called after exponential backoff delay */
+static void reconnect_timer_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    if (s_state == WIFI_STATE_STA_CONNECTING || s_state == WIFI_STATE_STA_LOST) {
+        ESP_LOGI(TAG, "Reconnect timer fired — attempting connect");
+        esp_wifi_connect();
+    }
+}
+
+/* ================================================================
+ * Event handlers (NON-BLOCKING — no vTaskDelay!)
+ * ================================================================ */
+
+static void schedule_reconnect(int delay_ms)
+{
+    if (s_reconnect_timer) {
+        xTimerStop(s_reconnect_timer, 0);
+        xTimerChangePeriod(s_reconnect_timer, pdMS_TO_TICKS(delay_ms), 0);
+        xTimerStart(s_reconnect_timer, 0);
+    }
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                int32_t event_id, void *event_data)
@@ -222,23 +265,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 if (delay > 30000) delay = 30000;
                 ESP_LOGI(TAG, "Reconnecting in %d ms (attempt %d/%d)",
                          delay, s_sta_retry_count, MAX_STA_RETRIES);
-                vTaskDelay(pdMS_TO_TICKS(delay));
-                esp_wifi_connect();
+                schedule_reconnect(delay);
             } else {
                 ESP_LOGW(TAG, "Max retries reached, falling back to AP mode");
                 esp_wifi_stop();
                 start_ap_mode();
             }
         } else if (s_state == WIFI_STATE_STA_CONNECTING) {
-            /* Retry with backoff — event handler owns the retry loop */
             s_sta_retry_count++;
             if (s_sta_retry_count < MAX_STA_RETRIES || !nvs_config_get()->ap_fallback) {
                 int delay = (1 << s_sta_retry_count) * 1000;
                 if (delay > 15000) delay = 15000;
                 ESP_LOGI(TAG, "Connect failed, retry in %d ms (%d/%d)",
                          delay, s_sta_retry_count, MAX_STA_RETRIES);
-                vTaskDelay(pdMS_TO_TICKS(delay));
-                esp_wifi_connect();
+                schedule_reconnect(delay);
             } else {
                 ESP_LOGW(TAG, "Max connect retries reached, falling back to AP mode");
                 esp_wifi_stop();
@@ -272,7 +312,6 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         xEventGroupSetBits(s_wifi_events, WIFI_EVENT_GOT_IP);
         led_indicator_set(LED_STATE_STA_READY);
 
-        /* Start web config page on STA IP (no DNS captive portal in STA mode) */
         web_server_start();
         ESP_LOGI(TAG, "Web config available at http://" IPSTR, IP2STR(&ev->ip_info.ip));
     }

@@ -78,26 +78,37 @@ static esp_err_t modbus_send_frame(const uint8_t *frame, int len)
     return ESP_OK;
 }
 
+/* Inter-byte timeout: if no new bytes arrive within this window, frame is incomplete */
+#define MODBUS_INTER_BYTE_TIMEOUT_MS  50
+
 /**
  * Receive a MODBUS response frame with timeout.
+ * Uses both overall timeout and inter-byte timeout to detect incomplete frames
+ * caused by RS485 line noise.
  * Returns frame length on success, or negative on error/timeout.
  */
 static int modbus_recv_frame(uint8_t *buf, int max_len, int timeout_ms)
 {
     int total = 0;
     int64_t start = esp_timer_get_time() / 1000;
+    int64_t last_byte_time = start;
 
     /* Wait for at least slave address + FC */
     while (total < 2) {
-        int64_t elapsed = (esp_timer_get_time() / 1000) - start;
-        if (elapsed > timeout_ms) {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now - start > timeout_ms) {
             if (total == 0)
                 ESP_LOGW(TAG, "Recv timeout (no data within %d ms)", timeout_ms);
             return -1;
         }
+        /* Inter-byte timeout check */
+        if (total > 0 && (now - last_byte_time) > MODBUS_INTER_BYTE_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "Inter-byte timeout after %d bytes", total);
+            return -1;
+        }
         int n = uart_read_bytes(modbus_uart_get_port(), buf + total, max_len - total,
                                 pdMS_TO_TICKS(50));
-        if (n > 0) total += n;
+        if (n > 0) { total += n; last_byte_time = esp_timer_get_time() / 1000; }
         if (n < 0) return -1;
     }
 
@@ -106,25 +117,23 @@ static int modbus_recv_frame(uint8_t *buf, int max_len, int timeout_ms)
     int expected_len = 0;
 
     if (fc == MODBUS_FC_READ_HOLDING || fc == MODBUS_FC_READ_INPUT) {
-        /* Response: [slave][fc][byte_count][data...][crc][crc] */
-        /* We need byte_count byte at offset 2 to determine length */
         while (total < 3) {
             int n = uart_read_bytes(modbus_uart_get_port(), buf + total, 1, pdMS_TO_TICKS(50));
-            if (n > 0) total += n;
-            if ((esp_timer_get_time() / 1000) - start > timeout_ms) return -1;
+            if (n > 0) { total += n; last_byte_time = esp_timer_get_time() / 1000; }
+            if (esp_timer_get_time() / 1000 - start > timeout_ms) return -1;
         }
-        expected_len = 3 + buf[2] + 2;  /* slave+fc+bc+data+crc */
+        expected_len = 3 + buf[2] + 2;
         if (expected_len > MODBUS_FRAME_MAX) {
             ESP_LOGW(TAG, "Bad byte_count 0x%02X → expected_len %d, clamping to %d",
                      buf[2], expected_len, MODBUS_FRAME_MAX);
             expected_len = MODBUS_FRAME_MAX;
         }
     } else if (fc == MODBUS_FC_WRITE_SINGLE) {
-        expected_len = 8;  /* echo of request */
+        expected_len = 8;
     } else if (fc == MODBUS_FC_WRITE_MULTI) {
-        expected_len = 8;  /* [slave][fc][start_hi][start_lo][count_hi][count_lo][crc][crc] */
+        expected_len = 8;
     } else if (fc & 0x80) {
-        expected_len = 5;  /* exception: [slave][fc|0x80][exc_code][crc][crc] */
+        expected_len = 5;
     } else {
         ESP_LOGW(TAG, "Unknown FC in response: 0x%02X", fc);
         return -1;
@@ -132,14 +141,18 @@ static int modbus_recv_frame(uint8_t *buf, int max_len, int timeout_ms)
 
     /* Read remaining bytes */
     while (total < expected_len) {
-        int64_t elapsed = (esp_timer_get_time() / 1000) - start;
-        if (elapsed > timeout_ms) {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now - start > timeout_ms) {
             ESP_LOGW(TAG, "Recv incomplete: got %d/%d bytes", total, expected_len);
+            return -1;
+        }
+        if ((now - last_byte_time) > MODBUS_INTER_BYTE_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "Inter-byte timeout at %d/%d bytes", total, expected_len);
             return -1;
         }
         int n = uart_read_bytes(modbus_uart_get_port(), buf + total, expected_len - total,
                                 pdMS_TO_TICKS(50));
-        if (n > 0) total += n;
+        if (n > 0) { total += n; last_byte_time = esp_timer_get_time() / 1000; }
     }
 
     /* Validate CRC */
@@ -157,6 +170,59 @@ static int modbus_recv_frame(uint8_t *buf, int max_len, int timeout_ms)
 }
 
 /* ================================================================
+ * Internal: common read register implementation (FC03 + FC04)
+ * ================================================================ */
+
+static esp_err_t modbus_read_registers(uint8_t fc, uint8_t slave_addr,
+                                        uint16_t start_reg, uint16_t count,
+                                        uint16_t *results_out)
+{
+    if (count < 1 || count > 125) return ESP_ERR_INVALID_ARG;
+    if (!results_out) return ESP_ERR_INVALID_ARG;
+
+    uint8_t frame[8];
+    frame[0] = slave_addr;
+    frame[1] = fc;
+    frame[2] = (start_reg >> 8) & 0xFF;
+    frame[3] = start_reg & 0xFF;
+    frame[4] = (count >> 8) & 0xFF;
+    frame[5] = count & 0xFF;
+
+    uint16_t crc = modbus_crc16(frame, 6);
+    frame[6] = crc & 0xFF;
+    frame[7] = crc >> 8;
+
+    esp_err_t ret = modbus_send_frame(frame, 8);
+    if (ret != ESP_OK) return ret;
+
+    if (slave_addr == MODBUS_BROADCAST) return ESP_OK;
+
+    uint8_t resp[MODBUS_FRAME_MAX];
+    int rlen = modbus_recv_frame(resp, sizeof(resp), MODBUS_DEFAULT_TIMEOUT_MS);
+    if (rlen < 0) return ESP_ERR_TIMEOUT;
+
+    if (resp[0] != slave_addr) return ESP_ERR_INVALID_RESPONSE;
+
+    if (resp[1] & 0x80) {
+        ESP_LOGW(TAG, "MODBUS exception: slave=%d, fc=0x%02X, code=%d",
+                 slave_addr, fc, resp[2]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    uint8_t byte_count = resp[2];
+    if (byte_count != count * 2) {
+        ESP_LOGE(TAG, "Byte count mismatch: expected %d, got %d", count * 2, byte_count);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    for (int i = 0; i < count; i++) {
+        results_out[i] = (resp[3 + i * 2] << 8) | resp[4 + i * 2];
+    }
+
+    return ESP_OK;
+}
+
+/* ================================================================
  * Public API
  * ================================================================ */
 
@@ -168,98 +234,15 @@ esp_err_t modbus_master_init(void)
 esp_err_t modbus_read_holding_registers(uint8_t slave_addr, uint16_t start_reg,
                                          uint16_t count, uint16_t *results_out)
 {
-    if (count < 1 || count > 125) return ESP_ERR_INVALID_ARG;
-    if (!results_out) return ESP_ERR_INVALID_ARG;
-
-    uint8_t frame[8];
-    frame[0] = slave_addr;
-    frame[1] = MODBUS_FC_READ_HOLDING;
-    frame[2] = (start_reg >> 8) & 0xFF;
-    frame[3] = start_reg & 0xFF;
-    frame[4] = (count >> 8) & 0xFF;
-    frame[5] = count & 0xFF;
-
-    uint16_t crc = modbus_crc16(frame, 6);
-    frame[6] = crc & 0xFF;
-    frame[7] = crc >> 8;
-
-    esp_err_t ret = modbus_send_frame(frame, 8);
-    if (ret != ESP_OK) return ret;
-
-    /* Broadcast: no response expected */
-    if (slave_addr == MODBUS_BROADCAST) return ESP_OK;
-
-    uint8_t resp[MODBUS_FRAME_MAX];
-    int rlen = modbus_recv_frame(resp, sizeof(resp), MODBUS_DEFAULT_TIMEOUT_MS);
-    if (rlen < 0) return ESP_ERR_TIMEOUT;
-
-    /* Check slave address and function code */
-    if (resp[0] != slave_addr) return ESP_ERR_INVALID_RESPONSE;
-
-    /* Exception? */
-    if (resp[1] & 0x80) {
-        ESP_LOGW(TAG, "MODBUS exception: slave=%d, fc=%d, code=%d",
-                 slave_addr, MODBUS_FC_READ_HOLDING, resp[2]);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    uint8_t byte_count = resp[2];
-    if (byte_count != count * 2) {
-        ESP_LOGE(TAG, "Byte count mismatch: expected %d, got %d", count * 2, byte_count);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    /* Extract register values (big-endian → host) */
-    for (int i = 0; i < count; i++) {
-        results_out[i] = (resp[3 + i * 2] << 8) | resp[4 + i * 2];
-    }
-
-    return ESP_OK;
+    return modbus_read_registers(MODBUS_FC_READ_HOLDING, slave_addr,
+                                  start_reg, count, results_out);
 }
 
 esp_err_t modbus_read_input_registers(uint8_t slave_addr, uint16_t start_reg,
                                        uint16_t count, uint16_t *results_out)
 {
-    if (count < 1 || count > 125) return ESP_ERR_INVALID_ARG;
-    if (!results_out) return ESP_ERR_INVALID_ARG;
-
-    uint8_t frame[8];
-    frame[0] = slave_addr;
-    frame[1] = MODBUS_FC_READ_INPUT;
-    frame[2] = (start_reg >> 8) & 0xFF;
-    frame[3] = start_reg & 0xFF;
-    frame[4] = (count >> 8) & 0xFF;
-    frame[5] = count & 0xFF;
-
-    uint16_t crc = modbus_crc16(frame, 6);
-    frame[6] = crc & 0xFF;
-    frame[7] = crc >> 8;
-
-    esp_err_t ret = modbus_send_frame(frame, 8);
-    if (ret != ESP_OK) return ret;
-
-    if (slave_addr == MODBUS_BROADCAST) return ESP_OK;
-
-    uint8_t resp[MODBUS_FRAME_MAX];
-    int rlen = modbus_recv_frame(resp, sizeof(resp), MODBUS_DEFAULT_TIMEOUT_MS);
-    if (rlen < 0) return ESP_ERR_TIMEOUT;
-
-    if (resp[0] != slave_addr) return ESP_ERR_INVALID_RESPONSE;
-
-    if (resp[1] & 0x80) {
-        ESP_LOGW(TAG, "MODBUS exception: slave=%d, fc=%d, code=%d",
-                 slave_addr, MODBUS_FC_READ_INPUT, resp[2]);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    uint8_t byte_count = resp[2];
-    if (byte_count != count * 2) return ESP_ERR_INVALID_SIZE;
-
-    for (int i = 0; i < count; i++) {
-        results_out[i] = (resp[3 + i * 2] << 8) | resp[4 + i * 2];
-    }
-
-    return ESP_OK;
+    return modbus_read_registers(MODBUS_FC_READ_INPUT, slave_addr,
+                                  start_reg, count, results_out);
 }
 
 esp_err_t modbus_write_single_register(uint8_t slave_addr, uint16_t reg_addr,

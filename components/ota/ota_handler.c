@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "esp_https_ota.h"
 #include "esp_ota_ops.h"
+#include "esp_crt_bundle.h"
 
 #include "ota_handler.h"
 #include "led_indicator.h"
@@ -68,12 +69,12 @@ static void ota_task(void *arg)
         ota_status("OTA update starting", false);
         led_indicator_set(LED_STATE_OTA_PROGRESS);
 
-        /* Configure HTTPS OTA (also works for plain HTTP when
-         * CONFIG_OTA_ALLOW_HTTP=y) */
+        /* Configure HTTPS OTA with certificate verification */
         esp_http_client_config_t http_cfg = {
             .url = url,
-            .timeout_ms = 30000,   /* 30s HTTP timeout per chunk */
-            .skip_cert_common_name_check = true,
+            .timeout_ms = 30000,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .skip_cert_common_name_check = false,
         };
 
         esp_https_ota_config_t ota_cfg = {
@@ -160,6 +161,18 @@ esp_err_t ota_request(const char *url)
 
     if (!url || strlen(url) == 0) {
         ESP_LOGE(TAG, "OTA request with empty URL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Enforce HTTPS — reject plaintext HTTP to prevent MITM attacks */
+    if (strncmp(url, "https://", 8) != 0) {
+        ESP_LOGE(TAG, "OTA URL must use HTTPS (got: %.32s...)", url);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* URL length validation */
+    if (strlen(url) >= OTA_URL_MAX_LEN) {
+        ESP_LOGE(TAG, "OTA URL too long (max %d chars)", OTA_URL_MAX_LEN - 1);
         return ESP_ERR_INVALID_ARG;
     }
 

@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
@@ -11,6 +12,7 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 
 #include "nvs_config.h"
 #include "wifi_manager.h"
@@ -30,15 +32,19 @@ static const char *TAG = "main";
 static TaskHandle_t s_modbus_task = NULL;
 static TaskHandle_t s_pub_task = NULL;
 
+/* Report timer — periodic JSON publish */
+static TimerHandle_t s_report_timer = NULL;
+
+/* Low memory warning threshold (bytes) */
+#define LOW_MEM_WARN_THRESHOLD  (20 * 1024)
+
+/* TWDT timeout for critical tasks */
+#define TWDT_TIMEOUT_S  30
+
 /* ================================================================
- * MQTT write-command callback (bridges to pipeline)
+ * MQTT write-command callback
  * ================================================================ */
 
-/**
- * Wrapper that adapts mqtt_data_cb_t(topic, data, len) →
- * pipeline_parse_write_json(data).
- * Runs in MQTT library task context — must NOT block.
- */
 static void on_write_received(const char *topic, const char *data, int len)
 {
     pipeline_parse_write_json(data, len);
@@ -48,19 +54,11 @@ static void on_write_received(const char *topic, const char *data, int len)
  * OTA callbacks
  * ================================================================ */
 
-/**
- * Forward OTA status messages to MQTT so the cloud can monitor progress.
- */
 static void ota_status_callback(const char *msg, bool error)
 {
     mqtt_client_publish_status(msg, strlen(msg));
 }
 
-/**
- * Handle incoming MQTT OTA commands.
- * Expected JSON payload: {"url": "https://ota.example.com/fw.bin"}
- * Runs in MQTT library task context — must NOT block.
- */
 static void on_ota_received(const char *topic, const char *data, int len)
 {
     cJSON *root = cJSON_ParseWithLength(data, len);
@@ -81,6 +79,30 @@ static void on_ota_received(const char *topic, const char *data, int len)
     }
 
     cJSON_Delete(root);
+}
+
+/* ================================================================
+ * Report timer callback — builds JSON and publishes
+ * ================================================================ */
+
+static void report_timer_cb(TimerHandle_t timer)
+{
+    (void)timer;
+
+    if (!mqtt_client_is_connected()) return;
+
+    char json_buf[2048];
+    int n = pipeline_build_report_json(json_buf, sizeof(json_buf), 0);  /* non-blocking */
+    if (n > 0) {
+        ESP_LOGI(TAG, "Publishing %d values", n);
+        mqtt_client_publish_data(json_buf, strlen(json_buf));
+
+        /* Periodic memory health check */
+        size_t free_heap = xPortGetFreeHeapSize();
+        if (free_heap < LOW_MEM_WARN_THRESHOLD) {
+            ESP_LOGW(TAG, "Low heap warning: %u bytes free", (unsigned)free_heap);
+        }
+    }
 }
 
 /* ================================================================
@@ -117,94 +139,138 @@ static void factory_reset_task(void *arg)
             if (hold >= RST_HOLD_THRESHOLD) {
                 ESP_LOGW(TAG, "Factory-reset triggered — erasing config and rebooting...");
                 led_indicator_set(LED_STATE_FACTORY_RESET);
-                vTaskDelay(pdMS_TO_TICKS(500));  /* let LED flash briefly */
+                vTaskDelay(pdMS_TO_TICKS(500));
                 nvs_config_reset();
                 /* nvs_config_reset() calls esp_restart() — never returns */
             }
-            /* Log progress every second */
             if (hold % 10 == 0) {
                 ESP_LOGI(TAG, "Reset button held: %d/%d ticks", hold, RST_HOLD_THRESHOLD);
             }
         } else {
-            hold = 0;   /* button released — reset counter */
+            hold = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(RST_POLL_MS));
     }
 }
 
 /* ================================================================
- * MQTT Publisher Task
+ * MQTT Publisher Task (Event-Driven)
  *
- * Waits for WiFi + MQTT connection, then:
- *  - Blocks on report_queue
- *  - Collects register values into a JSON batch
- *  - Publishes via MQTT
+ * Sleeps until WiFi + MQTT connection events arrive.
+ * A periodic FreeRTOS timer handles report publishing.
+ * No busy-loop polling.
  * ================================================================ */
 
 static void mqtt_publisher_task(void *arg)
 {
     EventGroupHandle_t wifi_events = (EventGroupHandle_t)wifi_manager_get_event_group();
+    EventGroupHandle_t mqtt_events = mqtt_client_get_event_group();
     bool mqtt_started = false;
 
     ESP_LOGI(TAG, "Publisher task waiting for WiFi...");
 
     while (1) {
-        /* Wait for WiFi to be ready (or AP mode started) */
-        EventBits_t bits = xEventGroupWaitBits(wifi_events,
-                              WIFI_EVENT_GOT_IP | WIFI_EVENT_AP_STARTED,
-                              pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));
+        /* Combine WiFi + MQTT event bits into one wait.
+         * Block indefinitely until a real event occurs. */
+        EventBits_t all_bits =
+            WIFI_EVENT_GOT_IP | WIFI_EVENT_AP_STARTED |
+            MQTT_EVENT_CONNECTED_BIT | MQTT_EVENT_DISCONNECTED_BIT;
 
-        if (bits & WIFI_EVENT_GOT_IP) {
+        /* Wait on both event groups — use shorter timeout to poll the other group */
+        EventBits_t wifi_bits = xEventGroupWaitBits(wifi_events,
+            WIFI_EVENT_GOT_IP | WIFI_EVENT_AP_STARTED,
+            pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));
+
+        if (wifi_bits & WIFI_EVENT_GOT_IP) {
             /* STA mode active — start MQTT if not already */
             if (!mqtt_started) {
                 ESP_LOGI(TAG, "WiFi ready, starting MQTT...");
                 if (mqtt_client_start(on_write_received, on_ota_received) == ESP_OK) {
                     mqtt_started = true;
-                    /* Wait a bit for MQTT connection */
-                    vTaskDelay(pdMS_TO_TICKS(3000));
                 } else {
-                    /* Start failed — back off before retry */
                     ESP_LOGW(TAG, "MQTT start failed, retrying in 10s...");
                     vTaskDelay(pdMS_TO_TICKS(10000));
+                    continue;
                 }
             }
 
-            /* If MQTT is connected, build and publish report */
-            if (mqtt_client_is_connected()) {
-                char json_buf[2048];
-                int n = pipeline_build_report_json(json_buf, sizeof(json_buf), 5000);
-                if (n > 0) {
-                    ESP_LOGI(TAG, "Publishing %d values: %s", n, json_buf);
-                    mqtt_client_publish_data(json_buf, strlen(json_buf));
+            /* Wait for MQTT connection event */
+            if (mqtt_events) {
+                EventBits_t mqtt_bits = xEventGroupWaitBits(mqtt_events,
+                    MQTT_EVENT_CONNECTED_BIT | MQTT_EVENT_DISCONNECTED_BIT,
+                    pdTRUE, pdFALSE, pdMS_TO_TICKS(30000));
+
+                if (mqtt_bits & MQTT_EVENT_CONNECTED_BIT) {
+                    ESP_LOGI(TAG, "MQTT connected — starting periodic report timer");
+
+                    /* Create and start periodic report timer */
+                    const config_t *cfg = nvs_config_get();
+                    TickType_t period = pdMS_TO_TICKS(cfg->poll_intv < 200 ? 200 : cfg->poll_intv);
+
+                    if (!s_report_timer) {
+                        s_report_timer = xTimerCreate("report", period, pdTRUE,
+                                                       NULL, report_timer_cb);
+                    }
+                    if (s_report_timer) {
+                        xTimerChangePeriod(s_report_timer, period, 0);
+                        xTimerStart(s_report_timer, 0);
+                    }
+
+                    /* Now just wait for disconnect or WiFi loss */
+                    while (mqtt_started && mqtt_client_is_connected() &&
+                           wifi_manager_get_state() == WIFI_STATE_STA_READY) {
+                        /* Sleep until an event occurs */
+                        wifi_bits = xEventGroupWaitBits(wifi_events,
+                            WIFI_EVENT_GOT_IP, /* dummy — just wait for any bit */
+                            pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
+
+                        if (wifi_manager_get_state() != WIFI_STATE_STA_READY) {
+                            break;  /* WiFi lost */
+                        }
+
+                        if (mqtt_events) {
+                            mqtt_bits = xEventGroupWaitBits(mqtt_events,
+                                MQTT_EVENT_DISCONNECTED_BIT,
+                                pdTRUE, pdFALSE, 0);
+                            if (mqtt_bits & MQTT_EVENT_DISCONNECTED_BIT) {
+                                ESP_LOGW(TAG, "MQTT disconnected — stopping report timer");
+                                break;
+                            }
+                        }
+                    }
+
+                    /* Stop report timer on disconnect */
+                    if (s_report_timer) {
+                        xTimerStop(s_report_timer, 0);
+                    }
+
+                    /* Trigger lightweight reconnect (no destroy) */
+                    if (wifi_manager_get_state() == WIFI_STATE_STA_READY) {
+                        mqtt_client_reconnect();
+                    }
                 }
-            } else if (mqtt_started) {
-                /* MQTT disconnected — wait and retry */
-                vTaskDelay(pdMS_TO_TICKS(1000));
             }
-        } else if (bits & WIFI_EVENT_AP_STARTED) {
-            /* AP mode — nothing to publish. Just wait. */
-            vTaskDelay(pdMS_TO_TICKS(1000));
+        } else if (wifi_bits & WIFI_EVENT_AP_STARTED) {
+            /* AP mode — nothing to publish */
+            vTaskDelay(pdMS_TO_TICKS(5000));
         } else {
-            /* Timeout — neither event received. Wait and retry. */
+            /* Timeout */
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
-        /* Handle WiFi disconnect: stop MQTT */
+        /* Handle WiFi disconnect: mark MQTT as not started, let auto-reconnect handle rest */
         if (mqtt_started && wifi_manager_get_state() == WIFI_STATE_STA_LOST) {
-            mqtt_client_stop();
+            ESP_LOGW(TAG, "WiFi lost — MQTT will auto-reconnect when WiFi recovers");
             mqtt_started = false;
-            ESP_LOGW(TAG, "WiFi lost, MQTT stopped");
+            if (s_report_timer) {
+                xTimerStop(s_report_timer, 0);
+            }
         }
     }
 }
 
 /* ================================================================
  * MODBUS Poll Task
- *
- * Waits for WiFi STA_READY + MQTT connected, then:
- *  - Periodically polls all configured register entries
- *  - Submits readings to data pipeline
- *  - Checks cmd_queue for pending write commands
  * ================================================================ */
 
 static void modbus_poll_task(void *arg)
@@ -216,10 +282,10 @@ static void modbus_poll_task(void *arg)
 
     ESP_LOGI(TAG, "MODBUS task waiting for system ready...");
 
-    TickType_t last_wake = 0;  /* initialized on first modbus_init */
+    TickType_t last_wake = 0;
 
     while (1) {
-        /* Wait for STA mode (GOT_IP) to be active */
+        /* Wait for STA mode */
         if (wifi_manager_get_state() != WIFI_STATE_STA_READY) {
             if (modbus_init_done) {
                 modbus_uart_deinit();
@@ -234,14 +300,13 @@ static void modbus_poll_task(void *arg)
 
         /* Initialize (or re-initialize) MODBUS after WiFi connected */
         if (!modbus_init_done) {
-            modbus_uart_deinit();   /* safe no-op if not initialized */
+            modbus_uart_deinit();
             if (modbus_master_init() != ESP_OK) {
                 ESP_LOGE(TAG, "MODBUS init failed, retrying...");
                 vTaskDelay(pdMS_TO_TICKS(5000));
                 continue;
             }
 
-            /* Parse register list from config (always re-parse on re-init) */
             const config_t *c = nvs_config_get();
             if (strlen(c->reg_list) > 0) {
                 entry_count = modbus_params_parse(c->reg_list, entries, MODBUS_MAX_ENTRIES);
@@ -255,13 +320,11 @@ static void modbus_poll_task(void *arg)
             last_wake = xTaskGetTickCount();
         }
 
-        /* Refresh config (may have changed via web) */
+        /* Refresh config */
         const config_t *cfg = nvs_config_get();
         TickType_t period = pdMS_TO_TICKS(cfg->poll_intv < 200 ? 200 : cfg->poll_intv);
 
-        /* ============================================================
-         * Poll loop: iterate all register entries
-         * ============================================================ */
+        /* Poll loop: iterate all register entries */
         for (int i = 0; i < entry_count && wifi_manager_get_state() == WIFI_STATE_STA_READY; i++) {
             register_entry_t *e = &entries[i];
             uint16_t results[125];
@@ -284,16 +347,13 @@ static void modbus_poll_task(void *arg)
                 ESP_LOGW(TAG, "MODBUS read failed: slave=%d, fc=%d, addr=%d, err=%d",
                          e->slave_addr, e->fc, e->start_reg, err);
                 led_indicator_set(LED_STATE_MODBUS_ERR);
-                /* Continue to next entry — don't block the loop */
             }
 
             /* MODBUS turnaround delay between requests */
             vTaskDelay(pdMS_TO_TICKS(5));
         }
 
-        /* ============================================================
-         * Process pending write commands (non-blocking drain)
-         * ============================================================ */
+        /* Process pending write commands (non-blocking drain) */
         write_cmd_t cmd;
         while (pipeline_dequeue_write_cmd(&cmd) == ESP_OK) {
             esp_err_t err = modbus_write_single_register(cmd.slave_addr,
@@ -304,7 +364,7 @@ static void modbus_poll_task(void *arg)
             } else {
                 ESP_LOGI(TAG, "Written: s%d:%d=%d", cmd.slave_addr, cmd.reg_addr, cmd.value);
             }
-            vTaskDelay(pdMS_TO_TICKS(10));  /* gap between writes */
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
 
         /* Wait until next poll cycle */
@@ -353,27 +413,42 @@ void app_main(void)
     esp_chip_info(&chip_info);
     uint32_t flash_size = 0;
     esp_flash_get_size(NULL, &flash_size);
-    ESP_LOGI(TAG, "Chip: %d cores, rev %d, flash=%d MB",
+    ESP_LOGI(TAG, "Chip: %d cores, rev %d, flash=%lu MB",
              chip_info.cores, chip_info.revision,
-             flash_size / (1024 * 1024));
+             (unsigned long)(flash_size / (1024 * 1024)));
 
-    /* ------ 8. Factory-reset button monitor (start before WiFi to ensure responsiveness) ------ */
+    /* Log initial heap status */
+    ESP_LOGI(TAG, "Free heap: %u bytes", (unsigned)xPortGetFreeHeapSize());
+
+    /* ------ 8. Task Watchdog Timer (TWDT) ------ */
+    esp_task_wdt_config_t twdt_config = {
+        .timeout_ms = TWDT_TIMEOUT_S * 1000,
+        .idle_core_mask = 0,       /* don't monitor idle tasks */
+        .trigger_panic = true,     /* reboot on TWDT timeout */
+    };
+    ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
+
+    /* ------ 9. Factory-reset button monitor ------ */
     xTaskCreatePinnedToCore(factory_reset_task, "rst_btn", 2048, NULL, 1,
                             NULL, 0);
 
-    /* ------ 9. Start WiFi state machine FIRST — creates event group that tasks depend on ------ */
-    /* NOTE: may block up to 30s during STA connect — factory-reset already running */
+    /* ------ 10. Start WiFi state machine ------ */
     wifi_manager_init();
 
-    /* ------ 10. Create main tasks ------ */
-    /* MODBUS poll task — pinned to Core 1 for real-time UART timing */
+    /* ------ 11. Create main tasks ------ */
     xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
                             &s_modbus_task, 1);
 
-    /* MQTT publisher task — Core 0 (shares with WiFi + web server) */
     xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 5120, NULL, 4,
                             &s_pub_task, 0);
 
-    /* app_main returns — FreeRTOS scheduler keeps tasks running */
+    /* Register TWDT subscribers */
+    if (s_modbus_task) {
+        esp_task_wdt_add(s_modbus_task);
+    }
+    if (s_pub_task) {
+        esp_task_wdt_add(s_pub_task);
+    }
+
     ESP_LOGI(TAG, "Init complete. System running.");
 }

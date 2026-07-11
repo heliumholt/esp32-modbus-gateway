@@ -3,9 +3,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "esp_log.h"
-#include "mqtt_client.h"       /* ESP-MQTT library (managed component) */
-#include "app_mqtt.h"          /* local function declarations */
+#include "esp_crt_bundle.h"       /* CA certificate bundle for TLS */
+#include "mqtt_client.h"           /* ESP-MQTT library (managed component) */
+#include "app_mqtt.h"              /* local function declarations */
 #include "nvs_config.h"
 #include "led_indicator.h"
 
@@ -13,21 +15,22 @@ static const char *TAG = "mqtt";
 
 static esp_mqtt_client_handle_t s_client = NULL;
 static SemaphoreHandle_t s_client_mutex = NULL;
+static EventGroupHandle_t s_mqtt_events = NULL;
 static mqtt_data_cb_t s_data_cb = NULL;
 static mqtt_ota_cb_t  s_ota_cb  = NULL;
 static volatile bool s_connected = false;
 
 /* Resolved topic strings (with {dev} replaced) */
-static char s_topic_data[64];
-static char s_topic_write[64];
-static char s_topic_status[64];
-static char s_topic_ota[64];
+static char s_topic_data[96];
+static char s_topic_write[96];
+static char s_topic_status[96];
+static char s_topic_ota[96];
 
 /* Cached topic lengths — set once after resolve_topic() */
 static size_t s_topic_write_len;
 static size_t s_topic_ota_len;
 
-/* OTA topic template — can be overridden via Kconfig */
+/* OTA topic template */
 #define OTA_TOPIC_TEMPLATE  "{dev}/ota"
 
 /* ================================================================
@@ -70,6 +73,11 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         s_connected = true;
         led_indicator_set(LED_STATE_MQTT_CONNECTED);
 
+        /* Signal connected event */
+        if (s_mqtt_events) {
+            xEventGroupSetBits(s_mqtt_events, MQTT_EVENT_CONNECTED_BIT);
+        }
+
         /* Publish birth message */
         mqtt_client_publish_status("online", 6);
 
@@ -83,9 +91,14 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         break;
 
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "MQTT disconnected");
+        ESP_LOGW(TAG, "MQTT disconnected (auto-reconnect enabled)");
         s_connected = false;
-        led_indicator_set(LED_STATE_STA_READY);  /* back to WiFi-only state */
+        led_indicator_set(LED_STATE_STA_READY);
+
+        /* Signal disconnected event */
+        if (s_mqtt_events) {
+            xEventGroupSetBits(s_mqtt_events, MQTT_EVENT_DISCONNECTED_BIT);
+        }
         break;
 
     case MQTT_EVENT_DATA:
@@ -112,9 +125,23 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         }
         break;
 
-    case MQTT_EVENT_ERROR:
-        ESP_LOGE(TAG, "MQTT error");
+    case MQTT_EVENT_ERROR: {
+        /* Log detailed error information */
+        esp_mqtt_error_codes_t *err = ev->error_handle;
+        if (err) {
+            ESP_LOGE(TAG, "MQTT error: type=%d, connect_as=%d, tls_stack=%d, tls_cert=%d",
+                     err->error_type,
+                     err->connect_return_code,
+                     err->esp_tls_last_esp_err,
+                     err->esp_tls_cert_verify_flags);
+            if (err->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+                ESP_LOGE(TAG, "  Transport error: sock_errno=%d, esp_tls_err=0x%x",
+                         err->esp_transport_sock_errno,
+                         err->esp_tls_last_esp_err);
+            }
+        }
         break;
+    }
 
     default:
         break;
@@ -127,11 +154,18 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 
 esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
 {
-    /* Create client mutex on first call (persists across stop/start cycles) */
+    /* Create mutex and event group on first call */
     if (!s_client_mutex) {
         s_client_mutex = xSemaphoreCreateMutex();
         if (!s_client_mutex) {
             ESP_LOGE(TAG, "Failed to create client mutex");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (!s_mqtt_events) {
+        s_mqtt_events = xEventGroupCreate();
+        if (!s_mqtt_events) {
+            ESP_LOGE(TAG, "Failed to create MQTT event group");
             return ESP_ERR_NO_MEM;
         }
     }
@@ -170,30 +204,31 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
     char uri[256];
     const char *raw = cfg->mqtt_uri;
     char host[224];
-    /* Copy raw to host, stripping trailing ":port" if present */
     strncpy(host, raw, sizeof(host) - 1);
     host[sizeof(host) - 1] = '\0';
     char *colon = strrchr(host, ':');
     if (colon && colon != host) {
-        /* Check preceding char isn't ':' (IPv6 like [::1]) or '/' (scheme://) */
         char prev = *(colon - 1);
         if (prev != ':' && prev != '/') {
-            *colon = '\0';  /* strip :port — use mqtt_port from config instead */
+            *colon = '\0';
         }
     }
 
+    bool use_tls = false;
     if (strncmp(host, "mqtt://", 7) == 0 ||
-        strncmp(host, "mqtts://", 8) == 0 ||
         strncmp(host, "tcp://", 6) == 0 ||
-        strncmp(host, "ssl://", 6) == 0 ||
-        strncmp(host, "ws://", 5) == 0 ||
-        strncmp(host, "wss://", 6) == 0) {
-        /* Already has scheme — don't double it */
+        strncmp(host, "ws://", 5) == 0) {
         snprintf(uri, sizeof(uri), "%s:%d", host, cfg->mqtt_port);
+    } else if (strncmp(host, "mqtts://", 8) == 0 ||
+               strncmp(host, "ssl://", 6) == 0 ||
+               strncmp(host, "wss://", 6) == 0) {
+        snprintf(uri, sizeof(uri), "%s:%d", host, cfg->mqtt_port);
+        use_tls = true;
     } else {
+        /* No scheme — default to mqtt:// */
         snprintf(uri, sizeof(uri), "mqtt://%s:%d", host, cfg->mqtt_port);
     }
-    ESP_LOGI(TAG, "MQTT broker URI: %s", uri);
+    ESP_LOGI(TAG, "MQTT broker URI: %s (TLS: %s)", uri, use_tls ? "yes" : "no");
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri,
@@ -203,7 +238,7 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
         .session.keepalive = 60,
         .session.disable_clean_session = false,
         .network.disable_auto_reconnect = false,
-        .network.reconnect_timeout_ms = 1000,
+        .network.reconnect_timeout_ms = 2000,
         .session.last_will = {
             .topic = s_topic_status,
             .msg = "offline",
@@ -212,6 +247,12 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
             .retain = 1,
         },
     };
+
+    /* TLS configuration: use ESP-IDF CA certificate bundle */
+    if (use_tls) {
+        mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+        mqtt_cfg.broker.verification.skip_cert_common_name_check = false;
+    }
 
     s_client = esp_mqtt_client_init(&mqtt_cfg);
     if (!s_client) {
@@ -241,29 +282,18 @@ esp_err_t mqtt_client_start(mqtt_data_cb_t on_data, mqtt_ota_cb_t on_ota)
     return ESP_OK;
 }
 
-esp_err_t mqtt_client_stop(void)
+esp_err_t mqtt_client_reconnect(void)
 {
-    if (!s_client_mutex) return ESP_OK;
-    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
+    if (!s_client) return ESP_ERR_INVALID_STATE;
 
-    if (!s_client) {
-        xSemaphoreGive(s_client_mutex);
-        return ESP_OK;
+    /* Trigger reconnection — esp-mqtt handles the rest internally.
+     * LWT automatically publishes "offline" when connection drops. */
+    esp_err_t ret = esp_mqtt_client_reconnect(s_client);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "MQTT reconnect trigger failed: %d", ret);
+        return ret;
     }
-
-    /* Publish offline (publish_status locks internally — release first) */
-    xSemaphoreGive(s_client_mutex);
-    mqtt_client_publish_status("offline", 7);
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
-    esp_mqtt_client_stop(s_client);
-    esp_mqtt_client_destroy(s_client);
-    s_client = NULL;
-    s_connected = false;
-    xSemaphoreGive(s_client_mutex);
-
-    ESP_LOGI(TAG, "MQTT client stopped");
+    ESP_LOGI(TAG, "MQTT reconnect triggered");
     return ESP_OK;
 }
 
@@ -304,4 +334,9 @@ esp_err_t mqtt_client_publish_status(const char *payload, int len)
 bool mqtt_client_is_connected(void)
 {
     return s_connected;
+}
+
+EventGroupHandle_t mqtt_client_get_event_group(void)
+{
+    return s_mqtt_events;
 }

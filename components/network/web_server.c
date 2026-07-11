@@ -154,14 +154,35 @@ static esp_err_t handle_payload_preview(httpd_req_t *req)
 /* POST /save — parse form data and write to NVS */
 static esp_err_t handle_post_save(httpd_req_t *req)
 {
-    char buf[2048] = {0};
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+    /* Validate Content-Length before receiving */
+    int content_len = httpd_req_get_hdr_value_len(req, "Content-Length");
+    if (content_len == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing Content-Length");
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "POST /save body: %s", buf);
+    char buf[2048] = {0};
+    if (content_len >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "Body too large");
+        /* Drain remaining data to keep connection clean */
+        int remaining = content_len - (int)sizeof(buf) + 1;
+        char drain[128];
+        while (remaining > 0) {
+            int chunk = remaining > (int)sizeof(drain) ? (int)sizeof(drain) : remaining;
+            httpd_req_recv(req, drain, chunk);
+            remaining -= chunk;
+        }
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, buf, content_len);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to receive body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    ESP_LOGI(TAG, "POST /save body (%d bytes)", ret);
 
     /* Parse URL-encoded form data: key1=val1&key2=val2... */
     nvs_config_lock();
@@ -174,7 +195,7 @@ static esp_err_t handle_post_save(httpd_req_t *req)
             char *key = pair;
             char *val = eq + 1;
 
-            /* URL-decode: + → space, %XX → byte */
+            /* URL-decode: + → space, %XX → byte (with hex validation) */
             char *src = val;
             char *dst = val;
             while (*src) {
@@ -182,8 +203,17 @@ static esp_err_t handle_post_save(httpd_req_t *req)
                     *dst++ = ' ';
                     src++;
                 } else if (*src == '%' && src[1] && src[2]) {
-                    char hex[3] = {src[1], src[2], '\0'};
-                    *dst++ = (char)strtol(hex, NULL, 16);
+                    char h1 = src[1], h2 = src[2];
+                    /* Validate hex characters */
+                    int valid = 1;
+                    if (!((h1 >= '0' && h1 <= '9') || (h1 >= 'a' && h1 <= 'f') || (h1 >= 'A' && h1 <= 'F'))) valid = 0;
+                    if (!((h2 >= '0' && h2 <= '9') || (h2 >= 'a' && h2 <= 'f') || (h2 >= 'A' && h2 <= 'F'))) valid = 0;
+                    if (valid) {
+                        char hex[3] = {h1, h2, '\0'};
+                        *dst++ = (char)strtol(hex, NULL, 16);
+                    } else {
+                        *dst++ = '%';  /* pass through invalid sequences */
+                    }
                     src += 3;
                 } else {
                     *dst++ = *src++;
@@ -208,9 +238,15 @@ static esp_err_t handle_post_save(httpd_req_t *req)
         pair = strtok_r(NULL, "&", &saveptr);
     }
 
-    /* Persist to NVS */
-    nvs_config_save();
+    /* Persist to NVS — check result */
+    esp_err_t save_err = nvs_config_save();
     nvs_config_unlock();
+
+    if (save_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS save failed: %d", save_err);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save config");
+        return ESP_FAIL;
+    }
 
     /* Respond success BEFORE mode switch — web_server_stop() kills the server */
     httpd_resp_set_type(req, "application/json");
