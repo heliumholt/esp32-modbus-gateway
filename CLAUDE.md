@@ -48,6 +48,8 @@ No tests exist yet — all verification is done on hardware.
 | OTA Handler | 0 | 2 | Blocks on queue → downloads firmware → reboots |
 | Factory Reset | 0 | 1 | Polls button GPIO, triggers NVS erase on 5s hold |
 | LED Indicator | 0 | 1 | WS2812 RMT driver, 25Hz pattern engine (GPIO 38) |
+| Display Manager | 0 | 3 | LVGL UI refresh task (created in `display_manager_init`) |
+| (LVGL internal) | 0 | 4 | `esp_lvgl_port` LVGL timer/render task |
 | (MQTT internal) | 0 | 5 | `esp-mqtt` library task |
 
 ### Data flow
@@ -109,7 +111,7 @@ MODBUS Slave ←RS485→ UART1 ←→ modbus_master ←→ modbus_poll_task(Core
 
 ### NVS config schema
 
-All config is in namespace `"config"`. Keys: `configd`, `dev_name`, `wifi_ssid`, `wifi_pass`, `ap_fallback`, `mqtt_uri`, `mqtt_port`, `mqtt_user`, `mqtt_pass`, `mqtt_data_t`, `mqtt_write_t`, `mqtt_stat_t`, `baudrate`, `data_bits`, `stop_bits`, `parity`, `reg_list`, `tx_pin`, `rx_pin`, `de_pin`, `poll_intv`, `custom1-3`.
+All config is in namespace `"config"`. Keys: `configd`, `dev_name`, `wifi_ssid`, `wifi_pass`, `ap_fallback`, `mqtt_uri`, `mqtt_port`, `mqtt_user`, `mqtt_pass`, `mqtt_data_t`, `mqtt_write_t`, `mqtt_stat_t`, `baudrate`, `data_bits`, `stop_bits`, `parity`, `reg_list`, `tx_pin`, `rx_pin`, `de_pin`, `poll_intv`, `lcd_cs`, `lcd_sck`, `lcd_mosi`, `lcd_miso`, `lcd_dc`, `lcd_reset`, `lcd_bl`, `touch_sda`, `touch_scl`, `touch_int`, `touch_rst`, `custom1-3`.
 
 ### MQTT protocol
 
@@ -164,6 +166,8 @@ Remaining ~4.3MB (0xBB2000–0x1000000) available for future SPIFFS or data stor
 | modbus | 5120 | entries[192] + results[250] = ~442 B | ~85% free |
 | mqtt_pub | 5120 | json_buf[2048] + cJSON recursion | ~55% free |
 | ota | 8192 | url[256] + esp_https_ota internals | generous |
+| display | 16384 | LVGL UI creation + style rendering | ample (raised from 8192) |
+| (LVGL task) | 12288 | esp_lvgl_port render | ample (raised from default 7168) |
 | rst_btn | 2048 | ~4 locals | plenty |
 
 ### Runtime input validation

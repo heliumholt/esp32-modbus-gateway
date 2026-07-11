@@ -61,6 +61,21 @@ typedef struct {
     /* Polling */
     uint32_t poll_intv;    /* milliseconds */
 
+    /* LCD SPI pins */
+    uint8_t lcd_spi_cs;
+    uint8_t lcd_spi_sck;
+    uint8_t lcd_spi_mosi;
+    uint8_t lcd_spi_miso;
+    uint8_t lcd_dc;
+    uint8_t lcd_reset;
+    uint8_t lcd_backlight;
+
+    /* Touch I2C pins */
+    uint8_t touch_i2c_sda;
+    uint8_t touch_i2c_scl;
+    uint8_t touch_int;
+    uint8_t touch_reset;
+
     /* Custom parameters */
     char     custom1[CONFIG_STR_LEN_CUSTOM];
     char     custom2[CONFIG_STR_LEN_CUSTOM];

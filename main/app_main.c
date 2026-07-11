@@ -25,6 +25,7 @@
 #include "cJSON.h"
 #include "driver/gpio.h"
 #include "led_indicator.h"
+#include "display_manager.h"
 
 static const char *TAG = "main";
 
@@ -402,7 +403,15 @@ void app_main(void)
     /* ------ 6. Initialize OTA handler ------ */
     ESP_ERROR_CHECK(ota_handler_init(ota_status_callback));
 
-    /* ------ 7. Log chip info ------ */
+    /* ------ 7. Initialize LCD display (optional) ------ */
+    esp_err_t display_ret = display_manager_init();
+    if (display_ret == ESP_OK) {
+        ESP_LOGI(TAG, "Display system initialized");
+    } else {
+        ESP_LOGW(TAG, "Display system init failed (continuing without display)");
+    }
+
+    /* ------ 8. Log chip info ------ */
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     uint32_t flash_size = 0;
@@ -414,35 +423,44 @@ void app_main(void)
     /* Log initial heap status */
     ESP_LOGI(TAG, "Free heap: %u bytes", (unsigned)xPortGetFreeHeapSize());
 
-    /* ------ 8. Task Watchdog Timer (TWDT) ------ */
+    /* ------ 9. Task Watchdog Timer (TWDT) ------ */
+    /* IDF 6.0 enables TWDT by default during startup; re-initializing here
+     * returns ESP_ERR_INVALID_STATE. Tolerate that case but still panic on
+     * genuine failures. */
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = TWDT_TIMEOUT_S * 1000,
         .idle_core_mask = 0,       /* don't monitor idle tasks */
         .trigger_panic = true,     /* reboot on TWDT timeout */
     };
-    ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config));
+    esp_err_t wdt_ret = esp_task_wdt_init(&twdt_config);
+    if (wdt_ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "TWDT already initialized, keeping existing config");
+    } else if (wdt_ret != ESP_OK) {
+        ESP_LOGW(TAG, "TWDT init failed (%s), continuing without watchdog", esp_err_to_name(wdt_ret));
+    }
 
-    /* ------ 9. Factory-reset button monitor ------ */
+    /* ------ 10. Factory-reset button monitor ------ */
     xTaskCreatePinnedToCore(factory_reset_task, "rst_btn", 2048, NULL, 1,
                             NULL, 0);
 
-    /* ------ 10. Start WiFi state machine ------ */
+    /* ------ 11. Start WiFi state machine ------ */
     wifi_manager_init();
 
-    /* ------ 11. Create main tasks ------ */
-    xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
-                            &s_modbus_task, 1);
-
-    xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 5120, NULL, 4,
-                            &s_pub_task, 0);
-
-    /* Register TWDT subscribers */
-    if (s_modbus_task) {
-        esp_task_wdt_add(s_modbus_task);
+    /* ------ 12. Create main tasks ------ */
+    if (xTaskCreatePinnedToCore(modbus_poll_task, "modbus", 5120, NULL, 5,
+                                &s_modbus_task, 1) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create modbus task — MODBUS polling will not run");
     }
-    if (s_pub_task) {
-        esp_task_wdt_add(s_pub_task);
+    if (xTaskCreatePinnedToCore(mqtt_publisher_task, "mqtt_pub", 5120, NULL, 4,
+                                &s_pub_task, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create mqtt_pub task — MQTT publishing will not run");
     }
+
+    /* These tasks use timeout-based waits (xEventGroupWaitBits + vTaskDelay),
+     * never busy-looping, so they cannot stall the CPU. They are intentionally
+     * NOT subscribed to the TWDT: subscribing would require esp_task_wdt_reset()
+     * calls the wait loops don't make (and mqtt_pub has a 10s retry delay that
+     * would exceed the TWDT timeout anyway), causing spurious watchdog trips. */
 
     ESP_LOGI(TAG, "Init complete. System running.");
 }

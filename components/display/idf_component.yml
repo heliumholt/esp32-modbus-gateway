@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File for Display Component
+## IDF 6.0+ restructured many drivers into separate components
+dependencies:
+  espressif/esp_lvgl_port:
+    version: "^2.0.0"
+  lvgl/lvgl:
+    version: "^8.3.0"
+  espressif/esp_lcd_ili9341:
+    version: "^2.0.0"
+  idf:
+    version: "^6.0"

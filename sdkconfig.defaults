@@ -59,3 +59,9 @@ CONFIG_MODBUS_GW_MQTT_URI="mqtt://test.mosquitto.org"
 CONFIG_MODBUS_GW_UART_TX=16
 CONFIG_MODBUS_GW_UART_RX=17
 CONFIG_MODBUS_GW_UART_DE=8
+
+# LVGL (RGB565 byte swap for SPI LCD — ILI9341 expects big-endian over SPI)
+CONFIG_LV_COLOR_16_SWAP=y
+# Disable default theme: its gradients band in RGB565 -> vertical lines. Use BASIC (flat colors).
+# CONFIG_LV_USE_THEME_DEFAULT is not set
+CONFIG_LV_USE_THEME_BASIC=y

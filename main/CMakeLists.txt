@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "app_main.c"
     INCLUDE_DIRS "."
-    REQUIRES config network modbus mqtt_app ota led
+    REQUIRES config network modbus mqtt_app ota led display
              nvs_flash esp_event esp_netif esp_timer
              spi_flash cjson esp_driver_gpio
 )

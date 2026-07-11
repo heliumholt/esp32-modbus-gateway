@@ -94,6 +94,21 @@ bool nvs_config_init(void)
     g_config.de_pin       = CONFIG_MODBUS_GW_UART_DE;
     g_config.poll_intv    = 5000;
 
+    /* LCD pins (defaults from lcd_driver.h) */
+    g_config.lcd_spi_cs   = 10;
+    g_config.lcd_spi_sck  = 12;
+    g_config.lcd_spi_mosi = 11;
+    g_config.lcd_spi_miso = 13;
+    g_config.lcd_dc       = 7;
+    g_config.lcd_reset    = 4;
+    g_config.lcd_backlight = 21;
+
+    /* Touch pins (defaults from touch_driver.h) */
+    g_config.touch_i2c_sda = 40;
+    g_config.touch_i2c_scl = 41;
+    g_config.touch_int     = 39;
+    g_config.touch_reset   = 42;
+
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
@@ -138,6 +153,21 @@ bool nvs_config_init(void)
     /* Clamp at load time — legacy values may exceed bounds */
     if (g_config.poll_intv < 200) g_config.poll_intv = 200;
     if (g_config.poll_intv > 3600000) g_config.poll_intv = 3600000;
+
+    /* LCD pins */
+    nvs_load_u8(h, "lcd_cs",     &g_config.lcd_spi_cs,     10);
+    nvs_load_u8(h, "lcd_sck",    &g_config.lcd_spi_sck,    12);
+    nvs_load_u8(h, "lcd_mosi",   &g_config.lcd_spi_mosi,   11);
+    nvs_load_u8(h, "lcd_miso",   &g_config.lcd_spi_miso,   13);
+    nvs_load_u8(h, "lcd_dc",     &g_config.lcd_dc,         7);
+    nvs_load_u8(h, "lcd_reset",  &g_config.lcd_reset,      4);
+    nvs_load_u8(h, "lcd_bl",     &g_config.lcd_backlight,  21);
+
+    /* Touch pins */
+    nvs_load_u8(h, "touch_sda",  &g_config.touch_i2c_sda,  40);
+    nvs_load_u8(h, "touch_scl",  &g_config.touch_i2c_scl,  41);
+    nvs_load_u8(h, "touch_int",  &g_config.touch_int,      39);
+    nvs_load_u8(h, "touch_rst",  &g_config.touch_reset,    42);
 
     /* Custom */
     nvs_load_str(h, "custom1", g_config.custom1, sizeof(g_config.custom1), "");
@@ -191,6 +221,22 @@ esp_err_t nvs_config_save(void)
     nvs_set_u8(h,  "de_pin",     g_config.de_pin);
     nvs_set_str(h, "reg_list",   g_config.reg_list);
     nvs_set_u32(h, "poll_intv",  g_config.poll_intv);
+
+    /* LCD pins */
+    nvs_set_u8(h,  "lcd_cs",     g_config.lcd_spi_cs);
+    nvs_set_u8(h,  "lcd_sck",    g_config.lcd_spi_sck);
+    nvs_set_u8(h,  "lcd_mosi",   g_config.lcd_spi_mosi);
+    nvs_set_u8(h,  "lcd_miso",   g_config.lcd_spi_miso);
+    nvs_set_u8(h,  "lcd_dc",     g_config.lcd_dc);
+    nvs_set_u8(h,  "lcd_reset",  g_config.lcd_reset);
+    nvs_set_u8(h,  "lcd_bl",     g_config.lcd_backlight);
+
+    /* Touch pins */
+    nvs_set_u8(h,  "touch_sda",  g_config.touch_i2c_sda);
+    nvs_set_u8(h,  "touch_scl",  g_config.touch_i2c_scl);
+    nvs_set_u8(h,  "touch_int",  g_config.touch_int);
+    nvs_set_u8(h,  "touch_rst",  g_config.touch_reset);
+
     nvs_set_str(h, "custom1",    g_config.custom1);
     nvs_set_str(h, "custom2",    g_config.custom2);
     nvs_set_str(h, "custom3",    g_config.custom3);
@@ -314,6 +360,28 @@ esp_err_t nvs_config_set_u8(const char *key, uint8_t value)
         g_config.rx_pin = value;
     } else if (strcmp(key, "de_pin") == 0) {
         g_config.de_pin = value;
+    } else if (strcmp(key, "lcd_cs") == 0) {
+        g_config.lcd_spi_cs = value;
+    } else if (strcmp(key, "lcd_sck") == 0) {
+        g_config.lcd_spi_sck = value;
+    } else if (strcmp(key, "lcd_mosi") == 0) {
+        g_config.lcd_spi_mosi = value;
+    } else if (strcmp(key, "lcd_miso") == 0) {
+        g_config.lcd_spi_miso = value;
+    } else if (strcmp(key, "lcd_dc") == 0) {
+        g_config.lcd_dc = value;
+    } else if (strcmp(key, "lcd_reset") == 0) {
+        g_config.lcd_reset = value;
+    } else if (strcmp(key, "lcd_bl") == 0) {
+        g_config.lcd_backlight = value;
+    } else if (strcmp(key, "touch_sda") == 0) {
+        g_config.touch_i2c_sda = value;
+    } else if (strcmp(key, "touch_scl") == 0) {
+        g_config.touch_i2c_scl = value;
+    } else if (strcmp(key, "touch_int") == 0) {
+        g_config.touch_int = value;
+    } else if (strcmp(key, "touch_rst") == 0) {
+        g_config.touch_reset = value;
     } else {
         ESP_LOGD(TAG, "Unknown u8 config key: %s", key);
         return ESP_ERR_NOT_FOUND;
