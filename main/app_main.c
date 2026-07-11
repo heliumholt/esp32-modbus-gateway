@@ -170,13 +170,7 @@ static void mqtt_publisher_task(void *arg)
     ESP_LOGI(TAG, "Publisher task waiting for WiFi...");
 
     while (1) {
-        /* Combine WiFi + MQTT event bits into one wait.
-         * Block indefinitely until a real event occurs. */
-        EventBits_t all_bits =
-            WIFI_EVENT_GOT_IP | WIFI_EVENT_AP_STARTED |
-            MQTT_EVENT_CONNECTED_BIT | MQTT_EVENT_DISCONNECTED_BIT;
-
-        /* Wait on both event groups — use shorter timeout to poll the other group */
+        /* Wait for WiFi event — use timeout to periodically re-check state */
         EventBits_t wifi_bits = xEventGroupWaitBits(wifi_events,
             WIFI_EVENT_GOT_IP | WIFI_EVENT_AP_STARTED,
             pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));
